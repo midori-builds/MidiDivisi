@@ -29,8 +29,9 @@ def get_note_level_label(n):
         labels.append(a.__class__.__name__)
 
     for e in n.expressions:
-        if e.__class__.__name__ == "Tremolo":
-            labels.append("Tremolo")
+        cls = e.__class__.__name__
+        if cls in ("Tremolo", "Trill"):
+            labels.append(cls)
 
     for sp in n.getSpannerSites():
         if sp.__class__.__name__ == "TremoloSpanner":
