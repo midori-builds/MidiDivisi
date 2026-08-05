@@ -1,12 +1,15 @@
 """
-MidiDivisi entry point
+MidiDivisi entry point.
+
+Just wires up the QApplication and shows the main window - all real
+logic lives in mididivisi/core (parsing) and mididivisi/ui (widgets).
 """
 
 import sys
 
 from PyQt6.QtWidgets import QApplication
 
-from mididivisi.ui.main_window import MainWindow # type: ignore
+from mididivisi.ui.main_window import MainWindow
 
 
 def main():

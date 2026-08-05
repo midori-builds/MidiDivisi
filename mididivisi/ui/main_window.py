@@ -1,11 +1,16 @@
 """
 MidiDivisi main window.
 
-Two things only, per current scope:
-  1. "Load MusicXML" button -> opens a file dialog
+Three things only, per current scope:
+  1. "Load MusicXML" button -> opens a file dialog, parses the score
   2. Read-only text output area -> shows the parsed articulation
      breakdown per part
+  3. "Export MIDI" button -> writes the whole score out as one
+     multi-track MIDI file, one track per (instrument, articulation)
+     group. Disabled until a score has been loaded successfully.
 """
+
+import os
 
 from PyQt6.QtWidgets import (
     QMainWindow,
@@ -16,9 +21,8 @@ from PyQt6.QtWidgets import (
     QFileDialog,
 )
 
-from music21 import converter
-
-from mididivisi.core.parser import get_part_articulation_counts
+from mididivisi.core.parser import load_score, get_part_articulation_groups
+from mididivisi.core.exporter import export_score_to_midi
 
 
 class MainWindow(QMainWindow):
@@ -27,9 +31,19 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("MidiDivisi")
         self.resize(800, 600)
 
+        # Holds the currently loaded music21 score, and the source
+        # file path (used to suggest a sensible export filename).
+        # Both are None until a file is loaded successfully.
+        self.score = None
+        self.loaded_file_path = None
+
         # --- widgets ---
         self.load_button = QPushButton("Load MusicXML")
         self.load_button.clicked.connect(self.load_musicxml)
+
+        self.export_button = QPushButton("Export MIDI")
+        self.export_button.clicked.connect(self.export_midi)
+        self.export_button.setEnabled(False)  # nothing loaded yet
 
         self.output = QTextEdit()
         self.output.setReadOnly(True)
@@ -39,6 +53,7 @@ class MainWindow(QMainWindow):
         central = QWidget()
         layout = QVBoxLayout(central)
         layout.addWidget(self.load_button)
+        layout.addWidget(self.export_button)
         layout.addWidget(self.output)
         self.setCentralWidget(central)
 
@@ -56,10 +71,14 @@ class MainWindow(QMainWindow):
         self.output.append(f"Loaded file: {file_path}")
 
         try:
-            score = converter.parse(file_path)
+            score = load_score(file_path)
         except Exception as e:
             self.output.append(f"Failed to parse file: {e}")
             return
+
+        self.score = score
+        self.loaded_file_path = file_path
+        self.export_button.setEnabled(True)
 
         parts = score.parts
         self.output.append(f"Found {len(parts)} part(s):")
@@ -70,11 +89,39 @@ class MainWindow(QMainWindow):
             name = part.partName or "(unnamed part)"
             self.output.append(f"\n{name}")
 
-            counts = get_part_articulation_counts(part)
+            groups = get_part_articulation_groups(part)
 
-            if not counts:
+            if not groups:
                 self.output.append("  (no notes found)")
                 continue
 
-            for label, count in sorted(counts.items()):
-                self.output.append(f"  - {label}: {count} note(s)")
+            for label, notes in sorted(groups.items()):
+                self.output.append(f"  - {label}: {len(notes)} note(s)")
+
+    def export_midi(self):
+        if self.score is None:
+            return  # export button should be disabled in this case anyway
+
+        # Suggest a filename based on the loaded MusicXML file's name.
+        default_name = "export.mid"
+        if self.loaded_file_path:
+            base = os.path.splitext(os.path.basename(self.loaded_file_path))[0]
+            default_name = f"{base}.mid"
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export MIDI",
+            default_name,
+            "MIDI Files (*.mid)",
+        )
+
+        if not save_path:
+            return  # user cancelled the dialog
+
+        try:
+            export_score_to_midi(self.score, save_path)
+        except Exception as e:
+            self.output.append(f"\nFailed to export MIDI: {e}")
+            return
+
+        self.output.append(f"\nExported MIDI to: {save_path}")

@@ -7,6 +7,8 @@ like pizzicato and mute that are encoded as free-text directions
 rather than per-note marks.
 """
 
+from music21 import converter
+
 # Free-text technique markings (from MusicXML <words> directions) that
 # represent a STATE change applying to all following notes, rather than
 # a per-note mark. Text is matched lowercase with trailing periods
@@ -15,6 +17,17 @@ PIZZICATO_ON_WORDS = {"pizz", "pizzicato"}
 PIZZICATO_OFF_WORDS = {"arco"}
 MUTE_ON_WORDS = {"mute", "muted", "con sord", "con sordino", "sord"}
 MUTE_OFF_WORDS = {"senza sord", "senza sordino", "open", "unmuted"}
+
+
+def load_score(file_path):
+    """Parse a MusicXML file and convert it to sounding (concert)
+    pitch. Transposing instruments (Clarinet in Bb, Horn in F, etc.)
+    store their notes as WRITTEN pitch in MusicXML - without this
+    conversion, exported MIDI would play the literal written notes,
+    which is wrong for every transposing instrument in the score.
+    """
+    score = converter.parse(file_path)
+    return score.toSoundingPitch()
 
 
 def get_note_level_label(n):
@@ -71,15 +84,20 @@ def get_technique_timeline(part):
     return events
 
 
-def get_part_articulation_counts(part):
+def get_part_articulation_groups(part):
     """Walk a part's notes/chords in order, tracking passage-level
     technique state (pizzicato/mute) alongside each note's own
-    per-note marks, and return a dict of {combined_label: count}.
+    per-note marks, and return a dict of
+    {combined_label: [note_or_chord, ...]}.
+
+    Keeping the actual Note/Chord objects (not just a count) is what
+    lets this feed MIDI export later - we need real pitch/offset/
+    duration data, not just how many notes matched a label.
     """
     events = get_technique_timeline(part)
     event_index = 0
     state = {"pizzicato": False, "mute": False}
-    counts = {}
+    groups = {}
 
     for n in part.flatten().notes:
         # Include both single Notes and Chords (double/multi-stops) -
@@ -111,6 +129,15 @@ def get_part_articulation_counts(part):
         else:
             label = "Sustain"
 
-        counts[label] = counts.get(label, 0) + 1
+        groups.setdefault(label, []).append(n)
 
-    return counts
+    return groups
+
+
+def get_part_articulation_counts(part):
+    """Same grouping as get_part_articulation_groups, but returns just
+    {label: count} - kept for the console-output view, which only
+    needs counts, not the underlying note objects.
+    """
+    groups = get_part_articulation_groups(part)
+    return {label: len(notes) for label, notes in groups.items()}
