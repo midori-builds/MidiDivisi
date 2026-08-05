@@ -30,9 +30,11 @@ dist/
 *.swo
 
 # --- OS-specific junk ---
-.DS_Store          # macOS
-Thumbs.db          # Windows
-desktop.ini        # Windows
+# macOS
+.DS_Store
+# Windows
+Thumbs.db
+desktop.ini
 
 # --- Testing / coverage ---
 .pytest_cache/
