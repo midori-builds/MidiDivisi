@@ -1,5 +1,5 @@
 """
-MidiDivisi
+MidiDivisi - minimal UI shell.
 """
 
 import sys
@@ -13,6 +13,8 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QFileDialog,
 )
+
+from music21 import converter
 
 
 class MainWindow(QMainWindow):
@@ -47,8 +49,23 @@ class MainWindow(QMainWindow):
         if not file_path:
             return  # user cancelled the dialog
 
-        # Placeholder output for now - parsing logic comes next.
         self.output.append(f"Loaded file: {file_path}")
+
+        try:
+            score = converter.parse(file_path)
+        except Exception as e:
+            self.output.append(f"Failed to parse file: {e}")
+            return
+
+        parts = score.parts
+        self.output.append(f"Found {len(parts)} part(s):")
+
+        for part in parts:
+            # partName is usually set from the instrument/staff name
+            # in the MusicXML; fall back if it's missing.
+            name = part.partName or "(unnamed part)"
+            note_count = len(part.flatten().notes)
+            self.output.append(f"  - {name}: {note_count} note(s)")
 
 
 def main():
