@@ -1,13 +1,17 @@
 """
 MidiDivisi main window.
 
-Three things only, per current scope:
+Four things only, per current scope:
   1. "Load MusicXML" button -> opens a file dialog, parses the score
   2. Read-only text output area -> shows the parsed articulation
      breakdown per part
   3. "Export MIDI" button -> writes the whole score out as one
      multi-track MIDI file, one track per (instrument, articulation)
-     group. Disabled until a score has been loaded successfully.
+     group.
+  4. "Export MIDI (Per Instrument)" button -> same grouping, but
+     writes one MIDI file per instrument into a chosen folder.
+  Both export buttons are disabled until a score has been loaded
+  successfully.
 """
 
 import os
@@ -22,7 +26,10 @@ from PyQt6.QtWidgets import (
 )
 
 from mididivisi.core.parser import load_score, get_part_articulation_groups
-from mididivisi.core.exporter import export_score_to_midi
+from mididivisi.core.exporter import (
+    export_score_to_midi,
+    export_score_to_midi_per_instrument,
+)
 
 
 class MainWindow(QMainWindow):
@@ -45,6 +52,14 @@ class MainWindow(QMainWindow):
         self.export_button.clicked.connect(self.export_midi)
         self.export_button.setEnabled(False)  # nothing loaded yet
 
+        self.export_per_instrument_button = QPushButton(
+            "Export MIDI (Per Instrument)"
+        )
+        self.export_per_instrument_button.clicked.connect(
+            self.export_midi_per_instrument
+        )
+        self.export_per_instrument_button.setEnabled(False)  # nothing loaded yet
+
         self.output = QTextEdit()
         self.output.setReadOnly(True)
         self.output.setPlaceholderText("Parsed data will show up here...")
@@ -54,6 +69,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.addWidget(self.load_button)
         layout.addWidget(self.export_button)
+        layout.addWidget(self.export_per_instrument_button)
         layout.addWidget(self.output)
         self.setCentralWidget(central)
 
@@ -79,6 +95,7 @@ class MainWindow(QMainWindow):
         self.score = score
         self.loaded_file_path = file_path
         self.export_button.setEnabled(True)
+        self.export_per_instrument_button.setEnabled(True)
 
         parts = score.parts
         self.output.append(f"Found {len(parts)} part(s):")
@@ -125,3 +142,27 @@ class MainWindow(QMainWindow):
             return
 
         self.output.append(f"\nExported MIDI to: {save_path}")
+
+    def export_midi_per_instrument(self):
+        if self.score is None:
+            return  # export button should be disabled in this case anyway
+
+        output_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Choose a folder for the exported MIDI files",
+        )
+
+        if not output_dir:
+            return  # user cancelled the dialog
+
+        try:
+            written_paths = export_score_to_midi_per_instrument(
+                self.score, output_dir
+            )
+        except Exception as e:
+            self.output.append(f"\nFailed to export MIDI: {e}")
+            return
+
+        self.output.append(f"\nExported {len(written_paths)} MIDI file(s) to: {output_dir}")
+        for path in sorted(written_paths):
+            self.output.append(f"  - {os.path.basename(path)}")
