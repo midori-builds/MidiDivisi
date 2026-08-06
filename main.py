@@ -10,10 +10,12 @@ import sys
 from PyQt6.QtWidgets import QApplication
 
 from mididivisi.ui.main_window import MainWindow
+from mididivisi.ui.theme import build_stylesheet
 
 
 def main():
     app = QApplication(sys.argv)
+    app.setStyleSheet(build_stylesheet())
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
