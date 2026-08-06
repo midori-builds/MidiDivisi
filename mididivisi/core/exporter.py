@@ -185,12 +185,19 @@ def export_session_to_midi_per_instrument(session, output_dir):
     from a grand staff) get a numeric suffix so files don't silently
     overwrite each other.
 
+    An instrument with included=False is skipped entirely, even if
+    some of its groups individually have included=True (same gating
+    rule as Session.get_export_groups).
+
     Returns the list of file paths actually written.
     """
     written_paths = []
     used_filenames = {}
 
     for instrument in session.instruments:
+        if not instrument.included:
+            continue
+
         included_groups = [g for g in instrument.groups if g.included]
         tracks_with_notes = [
             (g.name, g.get_combined_notes()) for g in included_groups

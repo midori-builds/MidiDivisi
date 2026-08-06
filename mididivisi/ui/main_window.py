@@ -2,18 +2,21 @@
 MidiDivisi main window.
 
 Three areas, per the current UI design:
-  1. Toolbar (top) - Open/Import, Export All, Export Per Instrument,
-     Merge, Auto Merge, Rename.
+  1. Toolbar (top) - Open/Import, Export, Merge, Auto Merge, Rename.
+     Export opens a dialog (ExportDialog) that owns both export modes
+     (Export All / Export Per Instrument), the destination folder,
+     the filename, and a dedicated inclusion tree.
   2. Track view (main area) - a QTreeWidget. Top-level items are
      Instruments; children are their current articulation Groups.
      Checkboxes on any row are a pure SELECTION mechanism (for
-     merge/rename targeting) - NOT an export-inclusion control. A
-     small "M" in the second column marks a merged row; double-
-     clicking it splits the merge back apart. Double-clicking a row's
-     name cell renames it in place.
+     merge/rename targeting) - NOT an export-inclusion control (that
+     lives in ExportDialog's own tree, bound to Group.included /
+     Instrument.included instead). A small "M" in the second column
+     marks a merged row; double-clicking it splits the merge back
+     apart. Double-clicking a row's name cell renames it in place.
   3. Status bar (bottom) - short transient messages (loaded, merged,
-     split, exported). Failures use a modal dialog instead, so they
-     can't be missed.
+     split). Export feedback and failures use modal dialogs (handled
+     inside ExportDialog itself), so they can't be missed.
 """
 
 import os
@@ -30,10 +33,7 @@ from PyQt6.QtWidgets import (
 
 from mididivisi.core.parser import load_score
 from mididivisi.core.session import Session
-from mididivisi.core.exporter import (
-    export_session_to_midi,
-    export_session_to_midi_per_instrument,
-)
+from mididivisi.ui.export_dialog import ExportDialog
 
 # Tree column indices
 COL_NAME = 0
@@ -47,7 +47,7 @@ class MainWindow(QMainWindow):
         self.resize(900, 650)
 
         # Holds the current Session (Track/Group/Instrument data) and
-        # the source file path (used to suggest a sensible export
+        # the source file path (used to default the export folder and
         # filename). Both are None until a file is loaded successfully.
         self.session = None
         self.loaded_file_path = None
@@ -72,17 +72,10 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        self.export_all_action = QAction("Export All", self)
-        self.export_all_action.triggered.connect(self.export_midi)
-        self.export_all_action.setEnabled(False)
-        toolbar.addAction(self.export_all_action)
-
-        self.export_per_instrument_action = QAction("Export Per Inst.", self)
-        self.export_per_instrument_action.triggered.connect(
-            self.export_midi_per_instrument
-        )
-        self.export_per_instrument_action.setEnabled(False)
-        toolbar.addAction(self.export_per_instrument_action)
+        self.export_action = QAction("Export", self)
+        self.export_action.triggered.connect(self.open_export_dialog)
+        self.export_action.setEnabled(False)
+        toolbar.addAction(self.export_action)
 
         toolbar.addSeparator()
 
@@ -268,8 +261,7 @@ class MainWindow(QMainWindow):
         self.session = Session.from_score(score)
         self.loaded_file_path = file_path
 
-        self.export_all_action.setEnabled(True)
-        self.export_per_instrument_action.setEnabled(True)
+        self.export_action.setEnabled(True)
         self.auto_merge_action.setEnabled(True)
 
         self.refresh_tree()
@@ -349,53 +341,20 @@ class MainWindow(QMainWindow):
             return
         self.tree.editItem(all_checked[0], COL_NAME)
 
-    def export_midi(self):
+    def open_export_dialog(self):
         if self.session is None:
             return
 
-        default_name = "export.mid"
+        default_folder = ""
+        default_filename = "export.mid"
         if self.loaded_file_path:
+            default_folder = os.path.dirname(self.loaded_file_path)
             base = os.path.splitext(os.path.basename(self.loaded_file_path))[0]
-            default_name = f"{base}.mid"
+            default_filename = f"{base}.mid"
 
-        save_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export MIDI",
-            default_name,
-            "MIDI Files (*.mid)",
-        )
+        dialog = ExportDialog(self.session, default_folder, default_filename, parent=self)
+        dialog.exec()
+        # Inclusion state lives on the actual Group/Instrument objects,
+        # so it persists automatically whether or not an export ran -
+        # nothing to sync back here.
 
-        if not save_path:
-            return
-
-        try:
-            export_session_to_midi(self.session, save_path)
-        except Exception as e:
-            QMessageBox.critical(self, "Export failed", str(e))
-            return
-
-        self.statusBar().showMessage(f"Exported MIDI to: {save_path}", 6000)
-
-    def export_midi_per_instrument(self):
-        if self.session is None:
-            return
-
-        output_dir = QFileDialog.getExistingDirectory(
-            self,
-            "Choose a folder for the exported MIDI files",
-        )
-
-        if not output_dir:
-            return
-
-        try:
-            written_paths = export_session_to_midi_per_instrument(
-                self.session, output_dir
-            )
-        except Exception as e:
-            QMessageBox.critical(self, "Export failed", str(e))
-            return
-
-        self.statusBar().showMessage(
-            f"Exported {len(written_paths)} MIDI file(s) to: {output_dir}", 6000
-        )

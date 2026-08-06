@@ -149,6 +149,7 @@ class Instrument:
         self.name = name
         self.identities = list(identities)
         self.groups = list(groups)
+        self.included = True
 
     @property
     def is_merged(self):
@@ -426,10 +427,19 @@ class Session:
         return new_instruments
 
     def get_export_groups(self):
-        """Return the currently-included groups (across every
-        instrument), ready for export. Excluded groups are simply
-        omitted - each remaining group's actual combined notes are
-        produced via get_combined_notes() at the point of export, not
-        precomputed here.
+        """Return the currently-included groups, ready for export.
+        A group is only included in the result if BOTH its own
+        `included` flag is True AND its owning Instrument's
+        `included` flag is True - unchecking an instrument acts as a
+        gate over its children, even if an individual group underneath
+        it still has included=True from before the instrument was
+        unchecked (that value is deliberately preserved, not cleared,
+        so re-checking the instrument restores each child's own prior
+        state).
         """
-        return [g for g in self.groups if g.included]
+        result = []
+        for instrument in self.instruments:
+            if not instrument.included:
+                continue
+            result.extend(g for g in instrument.groups if g.included)
+        return result
