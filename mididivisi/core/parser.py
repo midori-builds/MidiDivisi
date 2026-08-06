@@ -18,16 +18,101 @@ PIZZICATO_OFF_WORDS = {"arco"}
 MUTE_ON_WORDS = {"mute", "muted", "con sord", "con sordino", "sord"}
 MUTE_OFF_WORDS = {"senza sord", "senza sordino", "open", "unmuted"}
 
+# Default velocity mapping for explicit dynamic markings (p, mf, f,
+# etc.). This is a first-pass global default - no per-library
+# profiles or user overrides yet (planned for a future settings
+# dialog alongside sample-library profiles). Hairpins (cresc./dim.)
+# are NOT interpolated yet - a note inside a written crescendo just
+# keeps the last named dynamic's velocity until the next explicit
+# marking. See parser.py notes on hairpin spanner fragility for why
+# that's deferred rather than attempted now.
+DYNAMIC_VELOCITY_MAP = {
+    "ppp": 16,
+    "pp": 33,
+    "p": 49,
+    "mp": 64,
+    "mf": 80,
+    "f": 96,
+    "ff": 112,
+    "fff": 127,
+}
+
+DEFAULT_VELOCITY = DYNAMIC_VELOCITY_MAP["mf"]
+
 
 def load_score(file_path):
-    """Parse a MusicXML file and convert it to sounding (concert)
-    pitch. Transposing instruments (Clarinet in Bb, Horn in F, etc.)
-    store their notes as WRITTEN pitch in MusicXML - without this
-    conversion, exported MIDI would play the literal written notes,
-    which is wrong for every transposing instrument in the score.
+    """Parse a MusicXML file, convert it to sounding (concert) pitch,
+    and set each note's velocity based on the score's dynamics
+    markings. Transposing instruments (Clarinet in Bb, Horn in F,
+    etc.) store their notes as WRITTEN pitch in MusicXML - without
+    the sounding-pitch conversion, exported MIDI would play the
+    literal written notes, which is wrong for every transposing
+    instrument in the score.
     """
     score = converter.parse(file_path)
-    return score.toSoundingPitch()
+    score = score.toSoundingPitch()
+
+    for part in score.parts:
+        apply_dynamics_to_part(part)
+
+    return score
+
+
+def get_dynamics_timeline(part):
+    """Scan a part's explicit Dynamic markings (p, mf, f, etc.) and
+    return a list of (offset, velocity) events sorted by offset.
+    Unrecognized dynamic text (not in DYNAMIC_VELOCITY_MAP) is
+    skipped rather than guessed at.
+    """
+    events = []
+    for el in part.flatten():
+        if el.__class__.__name__ != "Dynamic":
+            continue
+
+        velocity = DYNAMIC_VELOCITY_MAP.get(el.value)
+        if velocity is None:
+            continue
+
+        events.append((el.offset, velocity))
+
+    events.sort(key=lambda ev: ev[0])
+    return events
+
+
+def apply_dynamics_to_part(part):
+    """Walk a part's notes/chords in order and set each one's
+    .volume.velocity based on the most recent explicit Dynamic
+    marking (a step function - no ramping across hairpins yet).
+    Notes before the first marking get DEFAULT_VELOCITY.
+
+    This mutates the notes in place (same as toSoundingPitch mutates
+    pitch) so every downstream consumer - grouping, export - picks up
+    the correct velocity automatically, with no changes needed
+    anywhere else in the pipeline.
+    """
+    events = get_dynamics_timeline(part)
+    event_index = 0
+    current_velocity = DEFAULT_VELOCITY
+
+    for n in part.flatten().notes:
+        if not (n.isNote or n.isChord):
+            continue
+
+        while event_index < len(events) and events[event_index][0] <= n.offset:
+            current_velocity = events[event_index][1]
+            event_index += 1
+
+        n.volume.velocity = current_velocity
+
+        # Volume.velocityIsRelative defaults to True, which tells
+        # music21's MIDI writer to blend our explicit value with its
+        # own internal reading of nearby Dynamic markings (via
+        # Volume.getRealized) - effectively double-counting the same
+        # dynamic we already used to compute current_velocity.
+        # Marking it False makes our calculated value authoritative.
+        # Verified directly: without this, a note under an 'f' marking
+        # (velocity 96) was actually written to MIDI as 102.
+        n.volume.velocityIsRelative = False
 
 
 def get_note_level_label(n):
@@ -47,8 +132,9 @@ def get_note_level_label(n):
             labels.append(cls)
 
     for sp in n.getSpannerSites():
-        if sp.__class__.__name__ == "TremoloSpanner":
-            labels.append("TremoloSpanner")
+        cls = sp.__class__.__name__
+        if cls in ("TremoloSpanner", "Glissando"):
+            labels.append(cls)
 
     seen = []
     for label in labels:
