@@ -33,36 +33,42 @@ def export_group_to_midi(notes, output_path):
     s.write("midi", fp=output_path)
 
 
+def _build_midi_track(track_name, notes):
+    """Build one MIDI Part/track with the given name, containing the
+    given notes. The single low-level primitive both the legacy
+    score-based export functions and the newer Session-based ones
+    build on.
+    """
+    track = stream.Part()
+
+    # Setting .partName on the Part alone does NOT produce a MIDI
+    # track_name meta event - music21's MIDI writer reads the name
+    # from an Instrument object inserted into the stream instead.
+    # Verified directly against exported bytes.
+    track_instrument = instrument.Instrument()
+    track_instrument.partName = track_name
+    track.insert(0, track_instrument)
+
+    for n in notes:
+        n_copy = copy.deepcopy(n)
+        track.insert(n.offset, n_copy)
+
+    return track
+
+
 def _build_instrument_tracks(part, instrument_name):
     """Build one MIDI Part/track per articulation group found in a
     single music21 Part, named "<instrument> - <label>". Shared by
-    both export modes below - a whole-score export just collects
-    every part's tracks into one file, while per-instrument export
-    writes each part's tracks into their own file.
+    both legacy (score-based) export modes below - a whole-score
+    export just collects every part's tracks into one file, while
+    per-instrument export writes each part's tracks into their own
+    file.
     """
     groups = get_part_articulation_groups(part)
-    tracks = []
-
-    for label, notes in groups.items():
-        track_name = f"{instrument_name} - {label}"
-
-        track = stream.Part()
-
-        # Setting .partName on the Part alone does NOT produce a MIDI
-        # track_name meta event - music21's MIDI writer reads the name
-        # from an Instrument object inserted into the stream instead.
-        # Verified directly against exported bytes.
-        track_instrument = instrument.Instrument()
-        track_instrument.partName = track_name
-        track.insert(0, track_instrument)
-
-        for n in notes:
-            n_copy = copy.deepcopy(n)
-            track.insert(n.offset, n_copy)
-
-        tracks.append(track)
-
-    return tracks
+    return [
+        _build_midi_track(f"{instrument_name} - {label}", notes)
+        for label, notes in groups.items()
+    ]
 
 
 def export_score_to_midi(score, output_path):
@@ -136,6 +142,75 @@ def export_score_to_midi_per_instrument(score, output_dir):
         out_score = stream.Score()
         for track in tracks:
             out_score.insert(0, track)
+        out_score.write("midi", fp=output_path)
+
+        written_paths.append(output_path)
+
+    return written_paths
+
+
+def export_session_to_midi(session, output_path):
+    """Export a Session's currently-included groups as ONE multi-track
+    MIDI file. Each Group becomes its own track, using the Group's
+    CURRENT name - which may be the original auto-generated label, a
+    user rename, or a merged-group name. This is what makes rename/
+    merge actually visible in the exported file, unlike the legacy
+    score-based export functions which always re-derive names fresh
+    from the score.
+
+    Groups with zero notes (shouldn't normally happen, but a merge of
+    two already-empty groups is theoretically possible) are skipped
+    rather than writing an empty track.
+    """
+    out_score = stream.Score()
+
+    for group in session.get_export_groups():
+        notes = group.get_combined_notes()
+        if not notes:
+            continue
+        out_score.insert(0, _build_midi_track(group.name, notes))
+
+    out_score.write("midi", fp=output_path)
+
+
+def export_session_to_midi_per_instrument(session, output_dir):
+    """Same idea as export_session_to_midi, but writes one MIDI file
+    per Instrument into output_dir - one file per row shown in the
+    UI's instrument-header level, reflecting current names and any
+    instrument-level merges, since this now iterates session.instruments
+    directly rather than re-deriving instrument groupings from track
+    data.
+
+    Instrument names that repeat (e.g. two un-merged "Harp" instruments
+    from a grand staff) get a numeric suffix so files don't silently
+    overwrite each other.
+
+    Returns the list of file paths actually written.
+    """
+    written_paths = []
+    used_filenames = {}
+
+    for instrument in session.instruments:
+        included_groups = [g for g in instrument.groups if g.included]
+        tracks_with_notes = [
+            (g.name, g.get_combined_notes()) for g in included_groups
+        ]
+        tracks_with_notes = [(name, notes) for name, notes in tracks_with_notes if notes]
+
+        if not tracks_with_notes:
+            continue  # nothing included/with notes for this instrument
+
+        base_filename = _sanitize_filename(instrument.name)
+
+        count = used_filenames.get(base_filename, 0)
+        used_filenames[base_filename] = count + 1
+        filename = base_filename if count == 0 else f"{base_filename} ({count + 1})"
+
+        output_path = os.path.join(output_dir, f"{filename}.mid")
+
+        out_score = stream.Score()
+        for track_name, notes in tracks_with_notes:
+            out_score.insert(0, _build_midi_track(track_name, notes))
         out_score.write("midi", fp=output_path)
 
         written_paths.append(output_path)
