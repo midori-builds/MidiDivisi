@@ -7,7 +7,7 @@ like pizzicato and mute that are encoded as free-text directions
 rather than per-note marks.
 """
 
-from music21 import converter
+from music21 import converter, key
 
 # Free-text technique markings (from MusicXML <words> directions) that
 # represent a STATE change applying to all following notes, rather than
@@ -128,8 +128,21 @@ def get_note_level_label(n):
 
     for e in n.expressions:
         cls = e.__class__.__name__
-        if cls in ("Tremolo", "Trill"):
+        if cls == "Tremolo":
             labels.append(cls)
+        elif cls == "Trill":
+            # Interval (whole-step M2 vs half-step m2) isn't written
+            # explicitly in MusicXML for a plain trill - it's inferred
+            # from the note's pitch and the surrounding key signature,
+            # same as a performer reading the score would. Falls back
+            # to a plain "Trill" label if inference fails for any
+            # reason, rather than crashing the whole parse.
+            try:
+                key_sig = n.getContextByClass(key.KeySignature)
+                size = e.getSize(n, keySig=key_sig)
+                labels.append(f"Trill-{size.name}")
+            except Exception:
+                labels.append("Trill")
 
     for sp in n.getSpannerSites():
         cls = sp.__class__.__name__
