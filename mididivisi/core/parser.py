@@ -7,7 +7,7 @@ like pizzicato and mute that are encoded as free-text directions
 rather than per-note marks.
 """
 
-from music21 import converter, key
+from music21 import converter, interval, key
 
 # Free-text technique markings (from MusicXML <words> directions) that
 # represent a STATE change applying to all following notes, rather than
@@ -39,23 +39,87 @@ DYNAMIC_VELOCITY_MAP = {
 
 DEFAULT_VELOCITY = DYNAMIC_VELOCITY_MAP["mf"]
 
+# Artificial harmonics are written as a two-note chord: a normal
+# notehead (the stopped/fingered pitch) plus a diamond notehead (the
+# lightly-touched node) some interval above it. The written chord is
+# NOT the sounding pitch - it shows fingering. The actual sounding
+# pitch is the stopped note transposed up by a fixed amount that
+# depends on the touch interval - each interval corresponds to a
+# specific harmonic partial. Verified against multiple independent
+# string-technique references (cellofun.eu, handwiki.org,
+# conductit.eu). Only these four touch intervals are well documented/
+# common enough to trust a formula for - m3 and M3 in particular are
+# rare in practice, but do have a real, distinct (non-interchangeable)
+# sounding-pitch relationship.
+ARTIFICIAL_HARMONIC_TRANSPOSITIONS = {
+    "P4": 24,  # 2 octaves above the stopped note (the standard/common case) - exact, 0 cents off equal temperament
+    "M3": 28,  # 2 octaves + a major 3rd above the stopped note - ~14 cents flat vs equal temperament (rare in practice)
+    "m3": 31,  # 2 octaves + a perfect 5th above the stopped note - ~2 cents sharp vs equal temperament (very rare in practice)
+    "P5": 19,  # 1 octave + a perfect 5th (a twelfth) above the stopped note - ~2 cents sharp vs equal temperament
+}
+
 
 def load_score(file_path):
     """Parse a MusicXML file, convert it to sounding (concert) pitch,
-    and set each note's velocity based on the score's dynamics
-    markings. Transposing instruments (Clarinet in Bb, Horn in F,
-    etc.) store their notes as WRITTEN pitch in MusicXML - without
-    the sounding-pitch conversion, exported MIDI would play the
-    literal written notes, which is wrong for every transposing
-    instrument in the score.
+    resolve artificial harmonics to their real sounding pitch, and set
+    each note's velocity based on the score's dynamics markings.
+
+    Transposing instruments (Clarinet in Bb, Horn in F, etc.) store
+    their notes as WRITTEN pitch in MusicXML - without the
+    sounding-pitch conversion, exported MIDI would play the literal
+    written notes, which is wrong for every transposing instrument in
+    the score.
     """
     score = converter.parse(file_path)
     score = score.toSoundingPitch()
 
     for part in score.parts:
+        resolve_artificial_harmonics(part)
         apply_dynamics_to_part(part)
 
     return score
+
+
+def resolve_artificial_harmonics(part):
+    """Find chords representing artificial harmonics (a diamond-notehead
+    touch pitch + a normal-notehead stopped pitch - the standard string
+    notation for this technique) and collapse them to a single note at
+    the ACTUAL sounding pitch, tagged so get_note_level_label can label
+    it correctly even though the identifying two-pitch shape is gone
+    after collapsing.
+
+    Only the three most common, well-documented touch intervals (P4,
+    M3, P5 - see ARTIFICIAL_HARMONIC_TRANSPOSITIONS) are corrected. Any
+    other touch interval is left as the literal written chord
+    (uncorrected pitch) but still tagged/labeled as an artificial
+    harmonic, so it stays visible as its own track rather than
+    silently blending into a generic Sustain bucket where there'd be
+    no indication it needs manual attention.
+    """
+    for n in part.flatten().notes:
+        if not n.isChord or len(n.pitches) != 2:
+            continue
+
+        chord_notes = n.notes  # the two constituent Note objects
+        diamond_notes = [cn for cn in chord_notes if cn.notehead == "diamond"]
+        normal_notes = [cn for cn in chord_notes if cn.notehead != "diamond"]
+
+        if len(diamond_notes) != 1 or len(normal_notes) != 1:
+            continue  # not the standard "1 touch + 1 stop" shape
+
+        touched_pitch = diamond_notes[0].pitch
+        stopped_pitch = normal_notes[0].pitch
+
+        iv = interval.Interval(stopped_pitch, touched_pitch)
+        semitone_shift = ARTIFICIAL_HARMONIC_TRANSPOSITIONS.get(iv.name)
+
+        if semitone_shift is not None:
+            sounding_pitch = stopped_pitch.transpose(semitone_shift)
+            n.pitches = [sounding_pitch]
+        # else: unrecognized touch interval - leave the written chord
+        # as-is (uncorrected), but still tag/label it below.
+
+        n.mididivisi_label = "ArtificialHarmonic"
 
 
 def get_dynamics_timeline(part):
@@ -121,6 +185,14 @@ def get_note_level_label(n):
     that notehead rather than a passage-level state (staccato, accent,
     single/measured tremolo, harmonics, etc.).
     """
+    # Artificial harmonics are tagged directly by resolve_artificial_
+    # harmonics before this runs, since the chord's pitches have
+    # already been collapsed to the sounding pitch by that point - the
+    # diamond-notehead shape that would normally identify it is gone.
+    override_label = getattr(n, "mididivisi_label", None)
+    if override_label:
+        return override_label
+
     labels = []
 
     for a in n.articulations:
