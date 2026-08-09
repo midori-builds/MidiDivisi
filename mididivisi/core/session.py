@@ -60,6 +60,18 @@ class Track:
         self.notes = notes  # list of music21 Note/Chord objects, never mutated here
         self.name = f"{instrument_identity.name} - {label}"  # mutable, user-editable
 
+    @property
+    def natural_key(self):
+        """A stable identity that survives re-parsing the SAME
+        MusicXML file, unlike .id (a fresh random UUID every parse).
+        Used for session save/load - re-parsing the same file in the
+        same order deterministically reproduces the same natural
+        keys, even though .id differs every time. See
+        InstrumentIdentity.natural_key for the instrument-level half
+        of this key.
+        """
+        return self.instrument_identity.natural_key + (self.label,)
+
     def __repr__(self):
         return f"Track(name={self.name!r}, notes={len(self.notes)})"
 
@@ -73,10 +85,25 @@ class InstrumentIdentity:
     persists across merge/split, same guarantee as Track.name.
     """
 
-    def __init__(self, original_name):
+    def __init__(self, original_name, occurrence_index=0):
         self.id = str(uuid.uuid4())
         self.original_name = original_name  # immutable provenance
         self.name = original_name  # mutable, user-editable, persists
+        # Which occurrence this is among parts sharing the same
+        # original_name (e.g. the two "Harp" parts from a grand staff
+        # get occurrence_index 0 and 1) - needed because original_name
+        # ALONE isn't unique, but (original_name, occurrence_index)
+        # is, and is stable across re-parsing the same file in the
+        # same order. See natural_key.
+        self.occurrence_index = occurrence_index
+
+    @property
+    def natural_key(self):
+        """A stable identity that survives re-parsing the SAME
+        MusicXML file, unlike .id (a fresh random UUID every parse).
+        Used for session save/load.
+        """
+        return (self.original_name, self.occurrence_index)
 
     def __repr__(self):
         return f"InstrumentIdentity(name={self.name!r})"
@@ -204,10 +231,14 @@ class Session:
         explicit "no auto-merge on load" decision.
         """
         session = cls()
+        occurrence_counts = {}  # original_name -> how many seen so far, for natural_key
 
         for part in score.parts:
             part_name = part.partName or "(unnamed part)"
-            identity = InstrumentIdentity(part_name)
+            occurrence_index = occurrence_counts.get(part_name, 0)
+            occurrence_counts[part_name] = occurrence_index + 1
+
+            identity = InstrumentIdentity(part_name, occurrence_index)
             session.instrument_identities.append(identity)
 
             articulation_groups = get_part_articulation_groups(part)

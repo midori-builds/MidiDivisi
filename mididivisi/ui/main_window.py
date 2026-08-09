@@ -2,10 +2,14 @@
 MidiDivisi main window.
 
 Three areas, per the current UI design:
-  1. Toolbar (top) - Open/Import, Export, Merge, Auto Merge, Rename.
-     Export opens a dialog (ExportDialog) that owns both export modes
-     (Export All / Export Per Instrument), the destination folder,
-     the filename, and a dedicated inclusion tree.
+  1. Menu bar (top) - File menu: Import, Open Session, Save Session,
+     Save Session As, a separator, Export, a separator, Settings.
+     Toolbar (below the menu bar) keeps only the track-editing
+     actions used constantly while actively shaping the track list:
+     Merge, Auto Merge, Merge Accents, Rename. This split happened
+     once the toolbar grew past ~7 items and stopped being scannable
+     - menu bar for organization/completeness, toolbar for one-click
+     access to the small set of things reached for constantly.
   2. Track view (main area) - a QTreeWidget. Top-level items are
      Instruments; children are their current articulation Groups.
      Checkboxes on any row are a pure SELECTION mechanism (for
@@ -15,8 +19,9 @@ Three areas, per the current UI design:
      marks a merged row; double-clicking it splits the merge back
      apart. Double-clicking a row's name cell renames it in place.
   3. Status bar (bottom) - short transient messages (loaded, merged,
-     split). Export feedback and failures use modal dialogs (handled
-     inside ExportDialog itself), so they can't be missed.
+     split, session saved/loaded). Export feedback and failures use
+     modal dialogs (handled inside ExportDialog itself, or directly
+     here for session load/save), so they can't be missed.
 """
 
 import os
@@ -29,10 +34,17 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItem,
     QFileDialog,
     QMessageBox,
+    QWidget,
+    QSizePolicy,
+    QStackedWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
 )
 
 from mididivisi.core.parser import load_score
 from mididivisi.core.session import Session
+from mididivisi.core import session_file
 from mididivisi.ui.export_dialog import ExportDialog
 from mididivisi.ui.settings_dialog import SettingsDialog
 
@@ -52,11 +64,16 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("MidiDivisi")
         self.resize(900, 650)
 
-        # Holds the current Session (Track/Group/Instrument data) and
-        # the source file path (used to default the export folder and
-        # filename). Both are None until a file is loaded successfully.
+        # Holds the current Session (Track/Group/Instrument data), the
+        # score currently in use (either the user's original MusicXML
+        # from Import, or the temp-extracted copy from Open Session -
+        # either way, "the file to re-embed if Save Session runs"),
+        # and the .mididivisi file this session is currently
+        # associated with (None until saved/loaded at least once -
+        # Save Session behaves like Save Session As the first time).
         self.session = None
         self.loaded_file_path = None
+        self.session_file_path = None
 
         # Chronological list of currently-checked QTreeWidgetItems -
         # tracked explicitly (not derived by re-scanning the tree)
@@ -64,26 +81,60 @@ class MainWindow(QMainWindow):
         # merge, and that's about click ORDER, not tree position.
         self.check_order = []
 
+        self._build_menu_bar()
         self._build_toolbar()
         self._build_tree()
         self.statusBar()  # instantiates the status bar
 
-    def _build_toolbar(self):
-        toolbar = self.addToolBar("Main")
-        toolbar.setMovable(False)
+        # Drag-and-drop MusicXML/session files onto the window.
+        # Enabling this on the top-level window alone is enough -
+        # child widgets (buttons, the tree) that haven't opted into
+        # drops themselves are transparent to Qt's drag-and-drop
+        # system, so events fall through to the nearest ancestor that
+        # does accept them. Works over both the empty-state canvas
+        # and the tree view, not just one or the other.
+        self.setAcceptDrops(True)
+
+    def _build_menu_bar(self):
+        menu_bar = self.menuBar()
+        file_menu = menu_bar.addMenu("File")
 
         self.open_action = QAction("Import", self)
         self.open_action.triggered.connect(self.load_musicxml)
-        toolbar.addAction(self.open_action)
+        file_menu.addAction(self.open_action)
 
-        toolbar.addSeparator()
+        file_menu.addSeparator()
+
+        self.open_session_action = QAction("Open Session", self)
+        self.open_session_action.triggered.connect(self.open_session)
+        file_menu.addAction(self.open_session_action)
+
+        self.save_session_action = QAction("Save Session", self)
+        self.save_session_action.triggered.connect(self.save_session)
+        self.save_session_action.setEnabled(False)
+        file_menu.addAction(self.save_session_action)
+
+        self.save_session_as_action = QAction("Save Session As...", self)
+        self.save_session_as_action.triggered.connect(self.save_session_as)
+        self.save_session_as_action.setEnabled(False)
+        file_menu.addAction(self.save_session_as_action)
+
+        file_menu.addSeparator()
 
         self.export_action = QAction("Export", self)
         self.export_action.triggered.connect(self.open_export_dialog)
         self.export_action.setEnabled(False)
-        toolbar.addAction(self.export_action)
+        file_menu.addAction(self.export_action)
 
-        toolbar.addSeparator()
+        file_menu.addSeparator()
+
+        self.settings_action = QAction("Settings", self)
+        self.settings_action.triggered.connect(self.open_settings_dialog)
+        file_menu.addAction(self.settings_action)  # always enabled - not tied to a loaded score
+
+    def _build_toolbar(self):
+        toolbar = self.addToolBar("Main")
+        toolbar.setMovable(False)
 
         self.merge_action = QAction("Merge", self)
         self.merge_action.triggered.connect(self.merge_selected)
@@ -105,11 +156,26 @@ class MainWindow(QMainWindow):
         self.rename_action.setEnabled(False)
         toolbar.addAction(self.rename_action)
 
-        toolbar.addSeparator()
+        # Spacer pushes everything after it to the far right of the
+        # toolbar. Export/Settings reuse the SAME QAction objects
+        # already created in _build_menu_bar (not new ones) - Qt
+        # keeps an action's enabled state and behavior in sync
+        # automatically across every place it's added, so there's no
+        # duplicate logic to maintain between the menu and toolbar
+        # copies. Plain text for now - icons planned later (per
+        # request), which will matter more here since these two will
+        # eventually be icon-only to save space.
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        # The app-wide QWidget {background: ...} rule in theme.py
+        # (added for scroll-area content) would otherwise paint this
+        # spacer a different shade than the toolbar around it -
+        # explicit instance-level stylesheet overrides that.
+        spacer.setStyleSheet("background: transparent;")
+        toolbar.addWidget(spacer)
 
-        self.settings_action = QAction("Settings", self)
-        self.settings_action.triggered.connect(self.open_settings_dialog)
-        toolbar.addAction(self.settings_action)  # always enabled - not tied to a loaded score
+        toolbar.addAction(self.export_action)
+        toolbar.addAction(self.settings_action)
 
     def _build_tree(self):
         self.tree = QTreeWidget()
@@ -121,7 +187,47 @@ class MainWindow(QMainWindow):
         self.tree.setSelectionMode(QTreeWidget.SelectionMode.NoSelection)
         self.tree.itemChanged.connect(self.on_item_changed)
         self.tree.itemDoubleClicked.connect(self.on_item_double_clicked)
-        self.setCentralWidget(self.tree)
+
+        self.empty_state_widget = self._build_empty_state()
+
+        # Central widget swaps between the empty-state canvas (two big
+        # Open/Import buttons) and the tree, rather than the tree
+        # always being visible even with nothing loaded.
+        self.central_stack = QStackedWidget()
+        self.central_stack.addWidget(self.empty_state_widget)
+        self.central_stack.addWidget(self.tree)
+        self.central_stack.setCurrentWidget(self.empty_state_widget)
+        self.setCentralWidget(self.central_stack)
+
+    def _build_empty_state(self):
+        """Blank-canvas view shown before anything is loaded: two big
+        buttons (Open session / Import MusicXML), centered. Plain
+        text for now - icons planned later (per request).
+        """
+        widget = QWidget()
+        outer = QVBoxLayout(widget)
+        outer.addStretch(1)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+
+        open_button = QPushButton("Open")
+        open_button.setFixedSize(160, 50)
+        open_button.setToolTip("Open session")
+        open_button.clicked.connect(self.open_session)
+        button_row.addWidget(open_button)
+
+        import_button = QPushButton("Import")
+        import_button.setFixedSize(160, 50)
+        import_button.setToolTip("Import MusicXML")
+        import_button.clicked.connect(self.load_musicxml)
+        button_row.addWidget(import_button)
+
+        button_row.addStretch(1)
+        outer.addLayout(button_row)
+        outer.addStretch(1)
+
+        return widget
 
     # --- Tree population -------------------------------------------------
 
@@ -258,6 +364,38 @@ class MainWindow(QMainWindow):
 
         self.refresh_tree()
 
+    # --- Drag and drop -----------------------------------------------------
+
+    MUSICXML_EXTENSIONS = (".xml", ".musicxml", ".mxl")
+    SESSION_EXTENSION = ".mididivisi"
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                path = url.toLocalFile().lower()
+                if path.endswith(self.MUSICXML_EXTENSIONS) or path.endswith(self.SESSION_EXTENSION):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if not urls:
+            event.ignore()
+            return
+
+        path = urls[0].toLocalFile()
+        lower = path.lower()
+
+        if lower.endswith(self.SESSION_EXTENSION):
+            self._open_session_path(path)
+            event.acceptProposedAction()
+        elif lower.endswith(self.MUSICXML_EXTENSIONS):
+            self._import_musicxml_path(path)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
     # --- Toolbar actions ---------------------------------------------------
 
     def load_musicxml(self):
@@ -271,6 +409,13 @@ class MainWindow(QMainWindow):
         if not file_path:
             return  # user cancelled the dialog
 
+        self._import_musicxml_path(file_path)
+
+    def _import_musicxml_path(self, file_path):
+        """The actual MusicXML-loading logic, given a path - shared by
+        the Import dialog and drag-and-drop, so there's one code path
+        for "load this file" regardless of how the path was obtained.
+        """
         try:
             score = load_score(file_path)
         except Exception as e:
@@ -279,18 +424,145 @@ class MainWindow(QMainWindow):
 
         self.session = Session.from_score(score)
         self.loaded_file_path = file_path
+        self.session_file_path = None  # fresh Import - no associated session file yet
 
         self.export_action.setEnabled(True)
         self.auto_merge_action.setEnabled(True)
         self.merge_accents_action.setEnabled(True)
+        self.save_session_action.setEnabled(True)
+        self.save_session_as_action.setEnabled(True)
 
         self.refresh_tree()
+        self.central_stack.setCurrentWidget(self.tree)
         self.statusBar().showMessage(
             f"Loaded: {os.path.basename(file_path)} "
             f"({len(self.session.instruments)} instrument(s), "
             f"{len(self.session.tracks)} track(s))",
             6000,
         )
+
+    def open_session(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Session",
+            "",
+            "MidiDivisi Session Files (*.mididivisi);;All Files (*)",
+        )
+
+        if not file_path:
+            return  # user cancelled the dialog
+
+        self._open_session_path(file_path)
+
+    def _open_session_path(self, file_path):
+        """The actual session-loading logic, given a path - shared by
+        the Open Session dialog and drag-and-drop.
+        """
+        try:
+            load_result = session_file.start_loading_session(file_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Failed to open session", str(e))
+            return
+
+        use_saved_settings = False
+        if load_result.settings_differ:
+            box = QMessageBox(self)
+            box.setWindowTitle("Settings differ")
+            box.setText(
+                "This session was saved with different Settings "
+                "(keyword mapping / dynamics mapping / accent "
+                "multiplier) than your current ones. Which should be "
+                "used to load it?"
+            )
+            use_saved_button = box.addButton("Use Saved Settings", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("Use Current Settings", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            use_saved_settings = box.clickedButton() is use_saved_button
+
+        try:
+            new_session, warnings = session_file.finish_loading_session(
+                load_result, use_saved_settings
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Failed to open session", str(e))
+            return
+
+        self.session = new_session
+        self.loaded_file_path = load_result.temp_score_path
+        self.session_file_path = file_path
+
+        self.export_action.setEnabled(True)
+        self.auto_merge_action.setEnabled(True)
+        self.merge_accents_action.setEnabled(True)
+        self.save_session_action.setEnabled(True)
+        self.save_session_as_action.setEnabled(True)
+
+        self.refresh_tree()
+        self.central_stack.setCurrentWidget(self.tree)
+
+        message = f"Opened session: {os.path.basename(file_path)}"
+        if warnings:
+            message += f" ({len(warnings)} item(s) from the saved session were skipped)"
+        self.statusBar().showMessage(message, 6000)
+
+        if warnings:
+            QMessageBox.warning(
+                self,
+                "Some items were skipped",
+                "The following items from the saved session no longer "
+                "match the score and were skipped:\n\n" + "\n".join(warnings),
+            )
+
+    def save_session(self):
+        if self.session is None:
+            return
+
+        if self.session_file_path is None:
+            self.save_session_as()
+            return
+
+        try:
+            session_file.save_session(
+                self.session, self.loaded_file_path, self.session_file_path
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Failed to save session", str(e))
+            return
+
+        self.statusBar().showMessage(
+            f"Session saved: {os.path.basename(self.session_file_path)}", 5000
+        )
+
+    def save_session_as(self):
+        if self.session is None:
+            return
+
+        default_name = "session.mididivisi"
+        if self.loaded_file_path:
+            base = os.path.splitext(os.path.basename(self.loaded_file_path))[0]
+            default_name = f"{base}.mididivisi"
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Session As",
+            default_name,
+            "MidiDivisi Session Files (*.mididivisi)",
+        )
+
+        if not file_path:
+            return  # user cancelled the dialog
+
+        if not file_path.lower().endswith(".mididivisi"):
+            file_path += ".mididivisi"
+
+        try:
+            session_file.save_session(self.session, self.loaded_file_path, file_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Failed to save session", str(e))
+            return
+
+        self.session_file_path = file_path
+        self.statusBar().showMessage(f"Session saved: {os.path.basename(file_path)}", 5000)
 
     def merge_selected(self):
         checked_instruments, checked_groups = self.get_checked_items()
