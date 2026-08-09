@@ -21,7 +21,7 @@ Three areas, per the current UI design:
 
 import os
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QMainWindow,
@@ -38,6 +38,11 @@ from mididivisi.ui.export_dialog import ExportDialog
 # Tree column indices
 COL_NAME = 0
 COL_MERGED = 1
+
+# Explicit fixed row height - see the matching comment in
+# export_dialog.py for why this is needed (Qt/QSS row-height drift on
+# repeated collapse/expand) and why width must be 0, not -1.
+ROW_HEIGHT = 26
 
 
 class MainWindow(QMainWindow):
@@ -127,6 +132,7 @@ class MainWindow(QMainWindow):
             instrument_item.setCheckState(COL_NAME, Qt.CheckState.Unchecked)
             instrument_item.setText(COL_NAME, instrument.name)
             instrument_item.setData(COL_NAME, Qt.ItemDataRole.UserRole, ("instrument", instrument))
+            instrument_item.setSizeHint(COL_NAME, QSize(0, ROW_HEIGHT))
 
             if instrument.is_merged:
                 instrument_item.setText(COL_MERGED, "M")
@@ -145,6 +151,7 @@ class MainWindow(QMainWindow):
                 group_item.setCheckState(COL_NAME, Qt.CheckState.Unchecked)
                 group_item.setText(COL_NAME, group.name)
                 group_item.setData(COL_NAME, Qt.ItemDataRole.UserRole, ("group", group))
+                group_item.setSizeHint(COL_NAME, QSize(0, ROW_HEIGHT))
 
                 if group.is_merged:
                     group_item.setText(COL_MERGED, "M")

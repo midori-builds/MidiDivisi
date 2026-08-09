@@ -16,7 +16,7 @@ rather than resetting everything to included.
 
 import os
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -36,6 +36,19 @@ from mididivisi.core.exporter import (
 )
 
 COL_NAME = 0
+
+# Explicit fixed row height. Without this, Qt recomputes each item's
+# height from the QSS padding (QTreeWidget::item in theme.py) on every
+# collapse/expand cycle, and that recomputation can drift upward
+# instead of staying stable - the "rows get taller every time you
+# reopen a group" bug. Fixing the height via setSizeHint sidesteps the
+# recomputation entirely rather than fighting it. Width must be a
+# non-negative value (0 works fine) - QSize(-1, height) is silently
+# discarded by PyQt6 rather than being treated as "auto width";
+# verified directly, not documented behavior. Actual column width is
+# still controlled separately (by the column-width/header setting),
+# so a width of 0 here only affects height.
+ROW_HEIGHT = 26
 
 
 class ExportDialog(QDialog):
@@ -105,6 +118,7 @@ class ExportDialog(QDialog):
             )
             instrument_item.setText(COL_NAME, instrument.name)
             instrument_item.setData(COL_NAME, Qt.ItemDataRole.UserRole, ("instrument", instrument))
+            instrument_item.setSizeHint(COL_NAME, QSize(0, ROW_HEIGHT))
 
             for group in instrument.groups:
                 group_item = QTreeWidgetItem(instrument_item)
@@ -118,6 +132,7 @@ class ExportDialog(QDialog):
                 group_item.setText(COL_NAME, group.name)
                 group_item.setData(COL_NAME, Qt.ItemDataRole.UserRole, ("group", group))
                 group_item.setDisabled(not instrument.included)
+                group_item.setSizeHint(COL_NAME, QSize(0, ROW_HEIGHT))
 
         self.tree.expandAll()
         self.tree.blockSignals(False)
