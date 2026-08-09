@@ -34,13 +34,36 @@ KEYWORD_CATEGORY_LABELS = {
     "pizzicato_off": "Pizzicato end (arco)",
     "mute_on": "Mute (start)",
     "mute_off": "Mute end (senza sord.)",
+    "flutter_on": "Flutter tongue (start)",
+    "flutter_off": "Flutter tongue (end)",
+    "sul_ponticello_on": "Sul ponticello (start)",
+    "sul_ponticello_off": "Sul ponticello (end)",
+    "sul_tasto_on": "Sul tasto / flautando (start)",
+    "sul_tasto_off": "Sul tasto / flautando (end)",
+    "col_legno_on": "Col legno (start)",
+    "col_legno_off": "Col legno (end)",
 }
 
+# Cancel-words for sul ponticello/sul tasto/col legno deliberately
+# overlap ("ord.", "naturale", "normale" all commonly mean "return to
+# normal position/technique" regardless of which special technique was
+# active) - this is intentional, not a mistake. get_technique_timeline
+# checks every category against each TextExpression rather than
+# stopping at the first match specifically so one shared cancel-word
+# can correctly turn off multiple active states at once.
 DEFAULT_KEYWORD_MAPPING = {
     "pizzicato_on": ["pizz", "pizzicato"],
     "pizzicato_off": ["arco"],
     "mute_on": ["mute", "muted", "con sord", "con sordino", "sord"],
     "mute_off": ["senza sord", "senza sordino", "open", "unmuted"],
+    "flutter_on": ["flutter", "flz", "fltr", "flutter tongue", "flatterzunge"],
+    "flutter_off": ["normale", "norm", "ord"],
+    "sul_ponticello_on": ["sul pont", "sul ponticello", "ponticello", "pont"],
+    "sul_ponticello_off": ["ord", "naturale", "nat", "pos nat"],
+    "sul_tasto_on": ["sul tasto", "flautando", "tasto"],
+    "sul_tasto_off": ["ord", "naturale", "nat", "pos nat"],
+    "col_legno_on": ["col legno", "col legno battuto", "col legno tratto"],
+    "col_legno_off": ["arco", "ord", "naturale", "nat"],
 }
 
 

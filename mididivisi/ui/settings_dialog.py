@@ -22,6 +22,8 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QLineEdit,
     QInputDialog,
+    QScrollArea,
+    QFrame,
 )
 
 from mididivisi.core.settings import settings, KEYWORD_CATEGORY_LABELS
@@ -127,7 +129,8 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(650, 500)
+        self.resize(760, 650)
+        self.setMinimumSize(600, 450)
 
         layout = QHBoxLayout(self)
 
@@ -150,5 +153,18 @@ class SettingsDialog(QDialog):
         # BACKLOG.md for what's planned.
 
     def _add_page(self, label, widget):
+        """Every page gets wrapped in a scroll area automatically, so
+        a future page with a lot of content doesn't need to handle
+        scrolling itself - it just needed to be added once, generally,
+        here, rather than per-page. Keyword Mapping is what surfaced
+        the need for this: 6 categories x (label + list + 3 buttons)
+        overflows a fixed-height dialog with no scroll wrapper.
+        """
         QListWidgetItem(label, self.category_list)
-        self.pages.addWidget(widget)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)  # avoid a double border against the dialog's own edge
+        scroll.setWidget(widget)
+
+        self.pages.addWidget(scroll)

@@ -20,6 +20,27 @@ from mididivisi.core.settings import settings
 # get_technique_timeline reads settings.get_keyword_set(...) live on
 # every call, so an edit made in the Settings dialog takes effect on
 # the next file load without needing to restart the app.
+#
+# Each entry here needs a matching "<key>_on"/"<key>_off" pair in
+# Settings' keyword mapping. STATE_KEYWORD_LABELS controls what shows
+# up in the combined articulation label (e.g. "SulPont+Staccato").
+STATE_KEYWORD_CATEGORIES = [
+    "pizzicato",
+    "mute",
+    "flutter",
+    "sul_ponticello",
+    "sul_tasto",
+    "col_legno",
+]
+
+STATE_KEYWORD_LABELS = {
+    "pizzicato": "Pizzicato",
+    "mute": "Mute",
+    "flutter": "Flutter",
+    "sul_ponticello": "SulPont",
+    "sul_tasto": "SulTasto",
+    "col_legno": "ColLegno",
+}
 
 # Default velocity mapping for explicit dynamic markings (p, mf, f,
 # etc.). This is a first-pass global default - no per-library
@@ -234,16 +255,20 @@ def get_note_level_label(n):
 
 def get_technique_timeline(part):
     """Scan a part's TextExpressions (from <words> directions) for
-    passage-level technique state changes like pizz./arco and
-    mute/senza sord. Returns a list of (offset, state_key, is_on)
-    events sorted by offset. Word lists are read live from Settings
-    on every call.
-    """
-    pizzicato_on_words = settings.get_keyword_set("pizzicato_on")
-    pizzicato_off_words = settings.get_keyword_set("pizzicato_off")
-    mute_on_words = settings.get_keyword_set("mute_on")
-    mute_off_words = settings.get_keyword_set("mute_off")
+    passage-level technique state changes (pizz./arco, mute/senza
+    sord., sul pont./ord., etc.). Returns a list of
+    (offset, state_key, is_on) events sorted by offset. Word lists are
+    read live from Settings on every call.
 
+    Checks EVERY known state category against each TextExpression,
+    rather than stopping at the first match - this matters because
+    cancel-words genuinely overlap between categories in real
+    notation (a single "ord."/"normale" commonly cancels whichever of
+    sul ponticello/sul tasto/col legno is currently active, not just
+    one specific one). An if/elif chain that stopped at the first
+    match would silently leave the others "on" when a shared
+    cancel-word appears.
+    """
     events = []
     for el in part.flatten():
         if el.__class__.__name__ != "TextExpression":
@@ -251,14 +276,14 @@ def get_technique_timeline(part):
 
         text = (el.content or "").strip().lower().rstrip(".")
 
-        if text in pizzicato_on_words:
-            events.append((el.offset, "pizzicato", True))
-        elif text in pizzicato_off_words:
-            events.append((el.offset, "pizzicato", False))
-        elif text in mute_on_words:
-            events.append((el.offset, "mute", True))
-        elif text in mute_off_words:
-            events.append((el.offset, "mute", False))
+        for state_key in STATE_KEYWORD_CATEGORIES:
+            on_words = settings.get_keyword_set(f"{state_key}_on")
+            off_words = settings.get_keyword_set(f"{state_key}_off")
+
+            if text in on_words:
+                events.append((el.offset, state_key, True))
+            if text in off_words:
+                events.append((el.offset, state_key, False))
 
     events.sort(key=lambda ev: ev[0])
     return events
@@ -266,8 +291,8 @@ def get_technique_timeline(part):
 
 def get_part_articulation_groups(part):
     """Walk a part's notes/chords in order, tracking passage-level
-    technique state (pizzicato/mute) alongside each note's own
-    per-note marks, and return a dict of
+    technique state (see STATE_KEYWORD_CATEGORIES) alongside each
+    note's own per-note marks, and return a dict of
     {combined_label: [note_or_chord, ...]}.
 
     Keeping the actual Note/Chord objects (not just a count) is what
@@ -276,7 +301,7 @@ def get_part_articulation_groups(part):
     """
     events = get_technique_timeline(part)
     event_index = 0
-    state = {"pizzicato": False, "mute": False}
+    state = {key: False for key in STATE_KEYWORD_CATEGORIES}
     groups = {}
 
     for n in part.flatten().notes:
@@ -288,17 +313,16 @@ def get_part_articulation_groups(part):
             continue
 
         # Apply any state-change events that occur at or before this
-        # note's offset.
+        # note's offset. Multiple events can share an offset (e.g. one
+        # "ord." cancelling two active states at once).
         while event_index < len(events) and events[event_index][0] <= n.offset:
             _, state_key, is_on = events[event_index]
             state[state_key] = is_on
             event_index += 1
 
-        state_labels = []
-        if state["pizzicato"]:
-            state_labels.append("Pizzicato")
-        if state["mute"]:
-            state_labels.append("Mute")
+        state_labels = [
+            STATE_KEYWORD_LABELS[key] for key in STATE_KEYWORD_CATEGORIES if state[key]
+        ]
 
         note_label = get_note_level_label(n)
 
