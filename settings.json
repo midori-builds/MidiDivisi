@@ -1,0 +1,70 @@
+{
+  "keyword_mapping": {
+    "pizzicato_on": [
+      "pizz",
+      "pizzicato"
+    ],
+    "pizzicato_off": [
+      "arco"
+    ],
+    "mute_on": [
+      "mute",
+      "muted",
+      "con sord",
+      "con sordino",
+      "sord"
+    ],
+    "mute_off": [
+      "senza sord",
+      "senza sordino",
+      "open",
+      "unmuted"
+    ],
+    "flutter_on": [
+      "flutter",
+      "flz",
+      "fltr",
+      "flutter tongue",
+      "flatterzunge"
+    ],
+    "flutter_off": [
+      "normale",
+      "norm",
+      "ord"
+    ],
+    "sul_ponticello_on": [
+      "sul pont",
+      "sul ponticello",
+      "ponticello",
+      "pont"
+    ],
+    "sul_ponticello_off": [
+      "ord",
+      "naturale",
+      "nat",
+      "pos nat"
+    ],
+    "sul_tasto_on": [
+      "sul tasto",
+      "flautando",
+      "tasto"
+    ],
+    "sul_tasto_off": [
+      "ord",
+      "naturale",
+      "nat",
+      "pos nat"
+    ],
+    "col_legno_on": [
+      "col legno",
+      "col legno battuto",
+      "col legno tratto"
+    ],
+    "col_legno_off": [
+      "arco",
+      "ord",
+      "naturale",
+      "nat"
+    ]
+  }
+}

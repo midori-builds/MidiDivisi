@@ -3,8 +3,13 @@ Settings/config data model.
 
 Unlike Session (deliberately in-memory-only, per-score), this IS
 persisted to disk - it's configuration, not per-score data, so it
-should survive between runs of the app. Stored as a small JSON file
-under the user's home directory.
+should survive between runs of the app. Stored as settings.json
+directly in the project root (not hidden, not in the user's home
+directory) - deliberate choice: this is a small utility tool, hiding
+the file doesn't buy anything real (it's already gitignored, so it
+won't get committed regardless), and once this ships as a packaged
+binary, users installing it normally won't be browsing the install
+directory anyway.
 
 Currently holds one thing: the keyword mapping used to detect
 passage-level techniques (pizzicato/arco, mute/senza sord.) from free-
@@ -23,8 +28,17 @@ same way.
 import json
 import os
 
-SETTINGS_DIR = os.path.expanduser("~/.mididivisi")
-SETTINGS_PATH = os.path.join(SETTINGS_DIR, "settings.json")
+# Anchored to this file's location rather than the current working
+# directory, so settings resolve correctly regardless of where the
+# app is launched FROM (e.g. running `python main.py` from a
+# different folder shouldn't change where settings are read/written).
+# settings.py lives at <project_root>/mididivisi/core/settings.py, so
+# two directories up from this file's own directory (core/) reaches
+# project_root: core/ -> mididivisi/ -> project_root.
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(_THIS_DIR))
+
+SETTINGS_PATH = os.path.join(PROJECT_ROOT, "settings.json")
 
 # Human-readable label for each keyword-mapping category, in display
 # order. The dict key is what's actually stored/matched against in
@@ -103,7 +117,9 @@ class Settings:
             self.keyword_mapping[category] = list(words)
 
     def save(self):
-        os.makedirs(SETTINGS_DIR, exist_ok=True)
+        # No directory creation needed - SETTINGS_PATH is directly in
+        # PROJECT_ROOT, which already exists (it's the running app's
+        # own project folder).
         with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump({"keyword_mapping": self.keyword_mapping}, f, indent=2)
 
