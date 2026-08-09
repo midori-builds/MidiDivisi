@@ -426,6 +426,82 @@ class Session:
 
         return new_instruments
 
+    def merge_accent_variants(self):
+        """Auto-merge any single-track group whose raw articulation
+        label includes Accent into the corresponding non-accented
+        group WITHIN THE SAME INSTRUMENT, if one currently exists
+        (e.g. "Staccato+Accent" merges into "Staccato"; a lone
+        "Accent" merges into "Sustain"). Accented notes stay separated
+        by default - this is an opt-in action, not automatic on load,
+        for people who don't have (or don't want) a dedicated
+        accented-technique patch.
+
+        StrongAccent is deliberately EXCLUDED from this, same
+        reasoning as the velocity amplifier in parser.py's
+        apply_dynamics_to_part: MusicXML has no separate "marcato"
+        element, so the marcato "^" symbol IS StrongAccent, and
+        marcato is meant to stay fully separate rather than folding
+        into its base technique automatically.
+
+        The "corresponding technique" is looked for among ANY current
+        group's member tracks (merged or not) - not just single-track
+        groups - so if multiple Accent-labeled groups exist for the
+        same base for some reason, the first merge creates the base
+        bucket and later ones correctly find and join it, rather than
+        only matching on the first pass. Only single-track groups are
+        ever the thing being ABSORBED, since an already-merged group
+        has no single unambiguous label to strip Accent from.
+
+        The base technique's current name always wins (it's passed
+        first to merge_groups), same "first-selected" naming rule
+        used everywhere else.
+
+        Velocity amplification for accented notes is independent of
+        this - it's applied to the note data itself at parse time
+        (see parser.py's apply_dynamics_to_part), so it survives
+        regardless of whether this merge ever runs.
+
+        Returns the number of merge operations performed.
+        """
+        merges_done = 0
+
+        for instrument in self.instruments:
+            while True:
+                found_pair = None
+
+                for group in instrument.groups:
+                    if group.is_merged:
+                        continue  # only single-track groups can be absorbed
+
+                    label = group.tracks[0].label
+                    parts = label.split("+")
+                    if "Accent" not in parts:
+                        continue
+
+                    remaining = [p for p in parts if p != "Accent"]
+                    base_label = "+".join(remaining) if remaining else "Sustain"
+
+                    base_group = next(
+                        (
+                            g for g in instrument.groups
+                            if g.id != group.id
+                            and any(t.label == base_label for t in g.tracks)
+                        ),
+                        None,
+                    )
+                    if base_group is not None:
+                        found_pair = (base_group, group)
+                        break
+
+                if found_pair is None:
+                    break
+
+                base_group, accent_group = found_pair
+                self.merge_groups([base_group.id, accent_group.id])
+                merges_done += 1
+
+        return merges_done
+
     def get_export_groups(self):
         """Return the currently-included groups, ready for export.
         A group is only included in the result if BOTH its own

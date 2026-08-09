@@ -164,6 +164,20 @@ def apply_dynamics_to_part(part):
     Settings (read live, not a value frozen at import time - if the
     user changes mf's velocity in Settings, that default updates too).
 
+    Notes carrying an Accent articulation get the result multiplied by
+    settings.accent_velocity_multiplier, clamped to the valid MIDI
+    range (0-127). StrongAccent is deliberately EXCLUDED - MusicXML
+    has no separate "marcato" element; the marcato "^" symbol IS
+    encoded as <strong-accent>/StrongAccent, so treating marcato as
+    distinct from plain accents (per design decision) means
+    StrongAccent is left out of this entirely, not just Marcato in
+    the abstract. See settings.py for the constant's full reasoning.
+    This amplification is applied directly to the note data (not
+    conditionally based on which Group/Track it later ends up in), so
+    it survives regardless of whether the note's accented variant
+    later gets merged into its base technique via
+    Session.merge_accent_variants.
+
     This mutates the notes in place (same as toSoundingPitch mutates
     pitch) so every downstream consumer - grouping, export - picks up
     the correct velocity automatically, with no changes needed
@@ -181,7 +195,14 @@ def apply_dynamics_to_part(part):
             current_velocity = events[event_index][1]
             event_index += 1
 
-        n.volume.velocity = current_velocity
+        velocity = current_velocity
+
+        articulation_names = {a.__class__.__name__ for a in n.articulations}
+        if "Accent" in articulation_names:
+            velocity = round(velocity * settings.accent_velocity_multiplier)
+            velocity = max(0, min(127, velocity))
+
+        n.volume.velocity = velocity
 
         # Volume.velocityIsRelative defaults to True, which tells
         # music21's MIDI writer to blend our explicit value with its
@@ -316,6 +337,18 @@ def get_part_articulation_groups(part):
         ]
 
         note_label = get_note_level_label(n)
+
+        # If the only per-note marking present is Accent/StrongAccent
+        # with no other technique, make the base explicit as
+        # "Sustain+Accent" rather than leaving it as bare "Accent" -
+        # for consistency with every other combination, which already
+        # shows the base technique alongside the accent (e.g.
+        # "Staccato+Accent"). Applies to StrongAccent too, same
+        # reasoning.
+        if note_label:
+            note_label_parts = note_label.split("+")
+            if all(p in ("Accent", "StrongAccent") for p in note_label_parts):
+                note_label = "+".join(["Sustain"] + note_label_parts)
 
         if note_label:
             label = "+".join(state_labels + [note_label])

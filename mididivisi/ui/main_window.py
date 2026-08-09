@@ -95,6 +95,11 @@ class MainWindow(QMainWindow):
         self.auto_merge_action.setEnabled(False)
         toolbar.addAction(self.auto_merge_action)
 
+        self.merge_accents_action = QAction("Merge Accents", self)
+        self.merge_accents_action.triggered.connect(self.merge_accents)
+        self.merge_accents_action.setEnabled(False)
+        toolbar.addAction(self.merge_accents_action)
+
         self.rename_action = QAction("Rename", self)
         self.rename_action.triggered.connect(self.rename_selected)
         self.rename_action.setEnabled(False)
@@ -277,6 +282,7 @@ class MainWindow(QMainWindow):
 
         self.export_action.setEnabled(True)
         self.auto_merge_action.setEnabled(True)
+        self.merge_accents_action.setEnabled(True)
 
         self.refresh_tree()
         self.statusBar().showMessage(
@@ -345,6 +351,28 @@ class MainWindow(QMainWindow):
             )
         else:
             self.statusBar().showMessage("Auto merge: no matching instruments found", 4000)
+
+        self.refresh_tree()
+
+    def merge_accents(self):
+        """Auto-merge any Accent-variant group into its corresponding
+        base technique, per instrument (e.g. "Staccato+Accent" folds
+        into "Staccato"). StrongAccent (marcato) is deliberately left
+        alone - see Session.merge_accent_variants for why. Runs
+        immediately when clicked, same as Auto Merge - no selection
+        required first, this is a whole-session action.
+        """
+        if self.session is None:
+            return
+
+        merged_count = self.session.merge_accent_variants()
+
+        if merged_count:
+            self.statusBar().showMessage(
+                f"Merged {merged_count} accented group(s) into their base technique", 5000
+            )
+        else:
+            self.statusBar().showMessage("Merge Accents: nothing to merge", 4000)
 
         self.refresh_tree()
 

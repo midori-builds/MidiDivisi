@@ -98,6 +98,19 @@ DEFAULT_DYNAMIC_VELOCITY_MAP = {
     "fff": 127,
 }
 
+# Shared multiplier applied to a note's already-computed dynamics
+# velocity when it carries an Accent or StrongAccent articulation
+# (Marcato is deliberately NOT included - treated as its own distinct
+# articulation, not accent-like, per design decision). One shared
+# value for both Accent and StrongAccent, not two separate ones - a
+# real simplification (a StrongAccent is conventionally played harder
+# than a plain Accent) but chosen deliberately for simplicity. Applied
+# at parse time directly on the note data, so it survives regardless
+# of whether the accented note's group later gets merged into its
+# base technique (see Session.merge_accent_variants) or stays
+# separate.
+DEFAULT_ACCENT_VELOCITY_MULTIPLIER = 1.15
+
 
 class Settings:
     """Holds current settings values and knows how to load/save
@@ -111,6 +124,7 @@ class Settings:
         # never touches the DEFAULT_KEYWORD_MAPPING constant itself.
         self.keyword_mapping = {k: list(v) for k, v in DEFAULT_KEYWORD_MAPPING.items()}
         self.dynamics_mapping = dict(DEFAULT_DYNAMIC_VELOCITY_MAP)
+        self.accent_velocity_multiplier = DEFAULT_ACCENT_VELOCITY_MULTIPLIER
         self.load()
 
     def load(self):
@@ -139,6 +153,9 @@ class Settings:
         for marking, velocity in loaded_dynamics.items():
             self.dynamics_mapping[marking] = int(velocity)
 
+        if "accent_velocity_multiplier" in data:
+            self.accent_velocity_multiplier = float(data["accent_velocity_multiplier"])
+
     def save(self):
         # No directory creation needed - SETTINGS_PATH is directly in
         # PROJECT_ROOT, which already exists (it's the running app's
@@ -148,6 +165,7 @@ class Settings:
                 {
                     "keyword_mapping": self.keyword_mapping,
                     "dynamics_mapping": self.dynamics_mapping,
+                    "accent_velocity_multiplier": self.accent_velocity_multiplier,
                 },
                 f,
                 indent=2,
@@ -174,6 +192,7 @@ class Settings:
 
     def reset_dynamics_to_default(self):
         self.dynamics_mapping = dict(DEFAULT_DYNAMIC_VELOCITY_MAP)
+        self.accent_velocity_multiplier = DEFAULT_ACCENT_VELOCITY_MULTIPLIER
 
 
 # Shared singleton instance - import THIS, not the class, from

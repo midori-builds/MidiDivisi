@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QMessageBox,
     QSpinBox,
+    QDoubleSpinBox,
 )
 
 from mididivisi.core.settings import (
@@ -203,10 +204,28 @@ class DynamicsMappingPage(QWidget):
             grid.setColumnStretch(2, 1)  # push the fixed-size spin boxes to the left instead of stretching them
 
         layout.addLayout(grid)
+
+        multiplier_row = QHBoxLayout()
+        multiplier_row.addWidget(QLabel("Accent velocity multiplier"))
+        self.multiplier_spin_box = QDoubleSpinBox()
+        self.multiplier_spin_box.setRange(1.0, 3.0)
+        self.multiplier_spin_box.setSingleStep(0.05)
+        self.multiplier_spin_box.setDecimals(2)
+        self.multiplier_spin_box.setValue(settings.accent_velocity_multiplier)
+        self.multiplier_spin_box.setFixedSize(90, 28)
+        self.multiplier_spin_box.valueChanged.connect(self.set_accent_multiplier)
+        multiplier_row.addWidget(self.multiplier_spin_box)
+        multiplier_row.addStretch(1)
+        layout.addLayout(multiplier_row)
+
         layout.addStretch(1)
 
     def set_velocity(self, marking, value):
         settings.dynamics_mapping[marking] = value
+        settings.save()
+
+    def set_accent_multiplier(self, value):
+        settings.accent_velocity_multiplier = value
         settings.save()
 
     def reset_all(self):
@@ -214,7 +233,7 @@ class DynamicsMappingPage(QWidget):
             self,
             "Reset all dynamics mappings?",
             "This will restore the built-in velocity values for every "
-            "dynamic marking.",
+            "dynamic marking, and the accent velocity multiplier.",
             QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
             QMessageBox.StandardButton.Cancel,
         )
@@ -231,6 +250,10 @@ class DynamicsMappingPage(QWidget):
             spin_box.blockSignals(True)
             spin_box.setValue(settings.dynamics_mapping.get(marking, 0))
             spin_box.blockSignals(False)
+
+        self.multiplier_spin_box.blockSignals(True)
+        self.multiplier_spin_box.setValue(settings.accent_velocity_multiplier)
+        self.multiplier_spin_box.blockSignals(False)
 
 
 class SettingsDialog(QDialog):
