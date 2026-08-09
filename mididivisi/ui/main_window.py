@@ -72,7 +72,7 @@ class MainWindow(QMainWindow):
         toolbar = self.addToolBar("Main")
         toolbar.setMovable(False)
 
-        self.open_action = QAction("Open / Import", self)
+        self.open_action = QAction("Import", self)
         self.open_action.triggered.connect(self.load_musicxml)
         toolbar.addAction(self.open_action)
 

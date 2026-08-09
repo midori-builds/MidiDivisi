@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QScrollArea,
     QFrame,
+    QMessageBox,
 )
 
 from mididivisi.core.settings import settings, KEYWORD_CATEGORY_LABELS
@@ -52,6 +53,13 @@ class KeywordMappingPage(QWidget):
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
+
+        reset_all_row = QHBoxLayout()
+        reset_all_row.addStretch(1)
+        reset_all_button = QPushButton("Reset All to Defaults")
+        reset_all_button.clicked.connect(self.reset_all_categories)
+        reset_all_row.addWidget(reset_all_button)
+        layout.addLayout(reset_all_row)
 
         self.category_widgets = {}  # category -> QListWidget
 
@@ -124,6 +132,38 @@ class KeywordMappingPage(QWidget):
         for word in settings.keyword_mapping.get(category, []):
             word_list.addItem(word)
 
+    def reset_all_categories(self):
+        # Only THIS button asks for confirmation, deliberately - the
+        # per-category Reset buttons stay one-click/no-confirmation on
+        # purpose (low blast radius, meant to be a frictionless safety
+        # net). This one can wipe custom words across every category
+        # at once, which is a meaningfully bigger loss to risk on a
+        # misclick.
+        confirmed = QMessageBox.question(
+            self,
+            "Reset all keyword mappings?",
+            "This will remove any custom words you've added across "
+            "every category and restore the built-in defaults.",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return
+
+        # Reuses reset_category per category rather than duplicating
+        # its logic - saves once at the end instead of once per
+        # category, since settings.save() is a full-file write and
+        # there's no need to hit disk 12 times for one user action.
+        for category in self.category_widgets:
+            settings.reset_category_to_default(category)
+
+            word_list = self.category_widgets[category]
+            word_list.clear()
+            for word in settings.keyword_mapping.get(category, []):
+                word_list.addItem(word)
+
+        settings.save()
+
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -132,14 +172,28 @@ class SettingsDialog(QDialog):
         self.resize(760, 650)
         self.setMinimumSize(600, 450)
 
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self)
+
+        top_row = QHBoxLayout()
 
         self.category_list = QListWidget()
         self.category_list.setFixedWidth(180)
-        layout.addWidget(self.category_list)
+        top_row.addWidget(self.category_list)
 
         self.pages = QStackedWidget()
-        layout.addWidget(self.pages, 1)
+        top_row.addWidget(self.pages, 1)
+
+        layout.addLayout(top_row, 1)
+
+        # Bottom bar - deliberately OUTSIDE the scrollable page area, so
+        # Close is always visible and reachable regardless of scroll
+        # position, per how the dialog is meant to behave.
+        bottom_row = QHBoxLayout()
+        bottom_row.addStretch(1)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        bottom_row.addWidget(close_button)
+        layout.addLayout(bottom_row)
 
         self._build_pages()
 

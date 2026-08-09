@@ -50,6 +50,7 @@ def build_stylesheet():
             border: 1px solid transparent;
             border-radius: 4px;
             padding: 6px 10px;
+            font-size: 13px;
         }}
 
         QToolButton:hover {{
@@ -88,6 +89,7 @@ def build_stylesheet():
             border: none;
             border-bottom: 1px solid {c['border']};
             border-right: 1px solid {c['border']};
+            font-size: 13px;
             padding: 6px 8px;
         }}
 
