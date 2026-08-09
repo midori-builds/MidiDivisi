@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QVBoxLayout,
+    QGridLayout,
     QListWidget,
     QStackedWidget,
     QWidget,
@@ -25,9 +26,14 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QFrame,
     QMessageBox,
+    QSpinBox,
 )
 
-from mididivisi.core.settings import settings, KEYWORD_CATEGORY_LABELS
+from mididivisi.core.settings import (
+    settings,
+    KEYWORD_CATEGORY_LABELS,
+    DYNAMIC_MARKING_ORDER,
+)
 
 
 class KeywordMappingPage(QWidget):
@@ -44,15 +50,6 @@ class KeywordMappingPage(QWidget):
         super().__init__(parent)
 
         layout = QVBoxLayout(self)
-
-        intro = QLabel(
-            "Words/phrases that trigger a technique change (e.g. \"pizz.\" "
-            "or \"con sord.\") when found as a text direction in the score. "
-            "Matching ignores case and a trailing period. Add wording your "
-            "own scores use if the built-in list doesn't catch it."
-        )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
 
         reset_all_row = QHBoxLayout()
         reset_all_row.addStretch(1)
@@ -165,6 +162,77 @@ class KeywordMappingPage(QWidget):
         settings.save()
 
 
+class DynamicsMappingPage(QWidget):
+    """One row per dynamic marking (ppp through fff): a label and a
+    QSpinBox for its velocity (0-127). Unlike Keyword Mapping, each
+    marking has exactly one value rather than a list of words, so
+    there's no Add/Remove - just direct editing, saved immediately on
+    every change (same immediate-commit philosophy as Keyword
+    Mapping's per-word edits).
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        layout = QVBoxLayout(self)
+
+        reset_all_row = QHBoxLayout()
+        reset_all_row.addStretch(1)
+        reset_all_button = QPushButton("Reset All to Defaults")
+        reset_all_button.clicked.connect(self.reset_all)
+        reset_all_row.addWidget(reset_all_button)
+        layout.addLayout(reset_all_row)
+
+        grid = QGridLayout()
+        self.spin_boxes = {}  # marking -> QSpinBox
+
+        for row, marking in enumerate(DYNAMIC_MARKING_ORDER):
+            grid.addWidget(QLabel(marking), row, 0)
+
+            spin_box = QSpinBox()
+            spin_box.setRange(0, 127)
+            spin_box.setValue(settings.dynamics_mapping.get(marking, 0))
+            spin_box.setFixedSize(90, 28)  # explicit size - don't rely on native
+                                            # sizing/CSS max-height alone, which
+                                            # rendered oddly oversized in testing
+            spin_box.valueChanged.connect(
+                lambda value, m=marking: self.set_velocity(m, value)
+            )
+            self.spin_boxes[marking] = spin_box
+            grid.addWidget(spin_box, row, 1)
+            grid.setColumnStretch(2, 1)  # push the fixed-size spin boxes to the left instead of stretching them
+
+        layout.addLayout(grid)
+        layout.addStretch(1)
+
+    def set_velocity(self, marking, value):
+        settings.dynamics_mapping[marking] = value
+        settings.save()
+
+    def reset_all(self):
+        confirmed = QMessageBox.question(
+            self,
+            "Reset all dynamics mappings?",
+            "This will restore the built-in velocity values for every "
+            "dynamic marking.",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return
+
+        settings.reset_dynamics_to_default()
+        settings.save()
+
+        for marking, spin_box in self.spin_boxes.items():
+            # blockSignals so setting the value doesn't fire
+            # valueChanged -> set_velocity -> another redundant save()
+            # for each of the 8 spin boxes.
+            spin_box.blockSignals(True)
+            spin_box.setValue(settings.dynamics_mapping.get(marking, 0))
+            spin_box.blockSignals(False)
+
+
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -202,9 +270,9 @@ class SettingsDialog(QDialog):
 
     def _build_pages(self):
         self._add_page("Keyword Mapping", KeywordMappingPage())
-        # Future pages (Dynamics/Velocity Mapping, Sample Library
-        # Profiles, etc.) get added here the same way - see
-        # BACKLOG.md for what's planned.
+        self._add_page("Dynamics Mapping", DynamicsMappingPage())
+        # Future pages (Sample Library Profiles, etc.) get added here
+        # the same way - see BACKLOG.md for what's planned.
 
     def _add_page(self, label, widget):
         """Every page gets wrapped in a scroll area automatically, so

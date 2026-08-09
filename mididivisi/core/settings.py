@@ -80,6 +80,24 @@ DEFAULT_KEYWORD_MAPPING = {
     "col_legno_off": ["arco", "ord", "naturale", "nat"],
 }
 
+# Human-readable label + display order for dynamics markings. Order
+# matters here (quiet -> loud) for how the Settings UI lists them -
+# unlike keyword mapping, this isn't a plain dict iteration order
+# concern since Python dicts preserve insertion order anyway, but
+# listing it explicitly keeps the intent obvious.
+DYNAMIC_MARKING_ORDER = ["ppp", "pp", "p", "mp", "mf", "f", "ff", "fff"]
+
+DEFAULT_DYNAMIC_VELOCITY_MAP = {
+    "ppp": 16,
+    "pp": 33,
+    "p": 49,
+    "mp": 64,
+    "mf": 80,
+    "f": 96,
+    "ff": 112,
+    "fff": 127,
+}
+
 
 class Settings:
     """Holds current settings values and knows how to load/save
@@ -92,6 +110,7 @@ class Settings:
         # Deep-copy the defaults so mutating self.keyword_mapping
         # never touches the DEFAULT_KEYWORD_MAPPING constant itself.
         self.keyword_mapping = {k: list(v) for k, v in DEFAULT_KEYWORD_MAPPING.items()}
+        self.dynamics_mapping = dict(DEFAULT_DYNAMIC_VELOCITY_MAP)
         self.load()
 
     def load(self):
@@ -116,12 +135,23 @@ class Settings:
         for category, words in loaded_mapping.items():
             self.keyword_mapping[category] = list(words)
 
+        loaded_dynamics = data.get("dynamics_mapping", {})
+        for marking, velocity in loaded_dynamics.items():
+            self.dynamics_mapping[marking] = int(velocity)
+
     def save(self):
         # No directory creation needed - SETTINGS_PATH is directly in
         # PROJECT_ROOT, which already exists (it's the running app's
         # own project folder).
         with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-            json.dump({"keyword_mapping": self.keyword_mapping}, f, indent=2)
+            json.dump(
+                {
+                    "keyword_mapping": self.keyword_mapping,
+                    "dynamics_mapping": self.dynamics_mapping,
+                },
+                f,
+                indent=2,
+            )
 
     def get_keyword_set(self, category):
         """Return the current word set for a category, normalized
@@ -133,6 +163,17 @@ class Settings:
 
     def reset_category_to_default(self, category):
         self.keyword_mapping[category] = list(DEFAULT_KEYWORD_MAPPING.get(category, []))
+
+    def get_dynamic_velocity(self, marking):
+        """Current velocity (0-127) for a dynamic marking (p/mf/f/etc.),
+        or None if the marking isn't recognized at all - parser.py
+        treats an unrecognized marking as "skip it" rather than
+        guessing, same as it already does for keyword categories.
+        """
+        return self.dynamics_mapping.get(marking)
+
+    def reset_dynamics_to_default(self):
+        self.dynamics_mapping = dict(DEFAULT_DYNAMIC_VELOCITY_MAP)
 
 
 # Shared singleton instance - import THIS, not the class, from

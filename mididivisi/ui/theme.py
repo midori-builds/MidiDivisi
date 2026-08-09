@@ -158,6 +158,28 @@ def build_stylesheet():
             border: 1px solid {c['accent']};
         }}
 
+        QSpinBox {{
+            background: {c['bg_content']};
+            color: {c['text']};
+            border: 1px solid {c['border']};
+            border-radius: 4px;
+            padding: 2px 6px;
+        }}
+
+        QSpinBox:focus {{
+            border: 1px solid {c['accent']};
+        }}
+
+        QSpinBox::up-button, QSpinBox::down-button {{
+            background: {c['bg_toolbar']};
+            border-left: 1px solid {c['border']};
+            width: 16px;
+        }}
+
+        QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+            background: {c['hover']};
+        }}
+
         QListWidget {{
             background: {c['bg_content']};
             color: {c['text']};

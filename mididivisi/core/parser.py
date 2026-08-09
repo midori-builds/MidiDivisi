@@ -43,25 +43,13 @@ STATE_KEYWORD_LABELS = {
 }
 
 # Default velocity mapping for explicit dynamic markings (p, mf, f,
-# etc.). This is a first-pass global default - no per-library
-# profiles or user overrides yet (planned for a future settings
-# dialog alongside sample-library profiles). Hairpins (cresc./dim.)
-# are NOT interpolated yet - a note inside a written crescendo just
-# keeps the last named dynamic's velocity until the next explicit
-# marking. See parser.py notes on hairpin spanner fragility for why
-# that's deferred rather than attempted now.
-DYNAMIC_VELOCITY_MAP = {
-    "ppp": 16,
-    "pp": 33,
-    "p": 49,
-    "mp": 64,
-    "mf": 80,
-    "f": 96,
-    "ff": 112,
-    "fff": 127,
-}
-
-DEFAULT_VELOCITY = DYNAMIC_VELOCITY_MAP["mf"]
+# etc.) now lives in settings.py (DEFAULT_DYNAMIC_VELOCITY_MAP), same
+# as the keyword-mapping categories - user-editable, persisted, read
+# live via settings.get_dynamic_velocity(). Hairpins (cresc./dim.) are
+# NOT interpolated yet - a note inside a written crescendo just keeps
+# the last named dynamic's velocity until the next explicit marking.
+# See parser.py notes on hairpin spanner fragility for why that's
+# deferred rather than attempted now.
 
 # Artificial harmonics are written as a two-note chord: a normal
 # notehead (the stopped/fingered pitch) plus a diamond notehead (the
@@ -149,7 +137,8 @@ def resolve_artificial_harmonics(part):
 def get_dynamics_timeline(part):
     """Scan a part's explicit Dynamic markings (p, mf, f, etc.) and
     return a list of (offset, velocity) events sorted by offset.
-    Unrecognized dynamic text (not in DYNAMIC_VELOCITY_MAP) is
+    Velocity values are read live from Settings on every call, same
+    as the keyword-mapping categories. Unrecognized dynamic text is
     skipped rather than guessed at.
     """
     events = []
@@ -157,7 +146,7 @@ def get_dynamics_timeline(part):
         if el.__class__.__name__ != "Dynamic":
             continue
 
-        velocity = DYNAMIC_VELOCITY_MAP.get(el.value)
+        velocity = settings.get_dynamic_velocity(el.value)
         if velocity is None:
             continue
 
@@ -171,7 +160,9 @@ def apply_dynamics_to_part(part):
     """Walk a part's notes/chords in order and set each one's
     .volume.velocity based on the most recent explicit Dynamic
     marking (a step function - no ramping across hairpins yet).
-    Notes before the first marking get DEFAULT_VELOCITY.
+    Notes before the first marking get the current "mf" velocity from
+    Settings (read live, not a value frozen at import time - if the
+    user changes mf's velocity in Settings, that default updates too).
 
     This mutates the notes in place (same as toSoundingPitch mutates
     pitch) so every downstream consumer - grouping, export - picks up
@@ -180,7 +171,7 @@ def apply_dynamics_to_part(part):
     """
     events = get_dynamics_timeline(part)
     event_index = 0
-    current_velocity = DEFAULT_VELOCITY
+    current_velocity = settings.get_dynamic_velocity("mf")
 
     for n in part.flatten().notes:
         if not (n.isNote or n.isChord):
