@@ -9,14 +9,17 @@ rather than per-note marks.
 
 from music21 import converter, interval, key
 
+from mididivisi.core.settings import settings
+
 # Free-text technique markings (from MusicXML <words> directions) that
 # represent a STATE change applying to all following notes, rather than
 # a per-note mark. Text is matched lowercase with trailing periods
-# stripped. Extend these sets as more test files surface new wording.
-PIZZICATO_ON_WORDS = {"pizz", "pizzicato"}
-PIZZICATO_OFF_WORDS = {"arco"}
-MUTE_ON_WORDS = {"mute", "muted", "con sord", "con sordino", "sord"}
-MUTE_OFF_WORDS = {"senza sord", "senza sordino", "open", "unmuted"}
+# stripped. The actual word lists now live in Settings (user-editable,
+# persisted to disk) rather than as fixed constants here - see
+# settings.py's DEFAULT_KEYWORD_MAPPING for the built-in defaults.
+# get_technique_timeline reads settings.get_keyword_set(...) live on
+# every call, so an edit made in the Settings dialog takes effect on
+# the next file load without needing to restart the app.
 
 # Default velocity mapping for explicit dynamic markings (p, mf, f,
 # etc.). This is a first-pass global default - no per-library
@@ -233,8 +236,14 @@ def get_technique_timeline(part):
     """Scan a part's TextExpressions (from <words> directions) for
     passage-level technique state changes like pizz./arco and
     mute/senza sord. Returns a list of (offset, state_key, is_on)
-    events sorted by offset.
+    events sorted by offset. Word lists are read live from Settings
+    on every call.
     """
+    pizzicato_on_words = settings.get_keyword_set("pizzicato_on")
+    pizzicato_off_words = settings.get_keyword_set("pizzicato_off")
+    mute_on_words = settings.get_keyword_set("mute_on")
+    mute_off_words = settings.get_keyword_set("mute_off")
+
     events = []
     for el in part.flatten():
         if el.__class__.__name__ != "TextExpression":
@@ -242,13 +251,13 @@ def get_technique_timeline(part):
 
         text = (el.content or "").strip().lower().rstrip(".")
 
-        if text in PIZZICATO_ON_WORDS:
+        if text in pizzicato_on_words:
             events.append((el.offset, "pizzicato", True))
-        elif text in PIZZICATO_OFF_WORDS:
+        elif text in pizzicato_off_words:
             events.append((el.offset, "pizzicato", False))
-        elif text in MUTE_ON_WORDS:
+        elif text in mute_on_words:
             events.append((el.offset, "mute", True))
-        elif text in MUTE_OFF_WORDS:
+        elif text in mute_off_words:
             events.append((el.offset, "mute", False))
 
     events.sort(key=lambda ev: ev[0])

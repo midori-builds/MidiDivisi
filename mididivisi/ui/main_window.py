@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
 from mididivisi.core.parser import load_score
 from mididivisi.core.session import Session
 from mididivisi.ui.export_dialog import ExportDialog
+from mididivisi.ui.settings_dialog import SettingsDialog
 
 # Tree column indices
 COL_NAME = 0
@@ -98,6 +99,12 @@ class MainWindow(QMainWindow):
         self.rename_action.triggered.connect(self.rename_selected)
         self.rename_action.setEnabled(False)
         toolbar.addAction(self.rename_action)
+
+        toolbar.addSeparator()
+
+        self.settings_action = QAction("Settings", self)
+        self.settings_action.triggered.connect(self.open_settings_dialog)
+        toolbar.addAction(self.settings_action)  # always enabled - not tied to a loaded score
 
     def _build_tree(self):
         self.tree = QTreeWidget()
@@ -364,4 +371,13 @@ class MainWindow(QMainWindow):
         # Inclusion state lives on the actual Group/Instrument objects,
         # so it persists automatically whether or not an export ran -
         # nothing to sync back here.
+
+    def open_settings_dialog(self):
+        # Not tied to a loaded score - Settings edits keyword mapping
+        # (and future categories) globally, independent of any
+        # currently-open file. Changes apply live/immediately (see
+        # KeywordMappingPage) and take effect on the NEXT file load,
+        # not retroactively on an already-loaded session.
+        dialog = SettingsDialog(parent=self)
+        dialog.exec()
 
