@@ -121,6 +121,13 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
+        self.close_file_action = QAction("Close File", self)
+        self.close_file_action.triggered.connect(self.close_file)
+        self.close_file_action.setEnabled(False)
+        file_menu.addAction(self.close_file_action)
+
+        file_menu.addSeparator()
+
         self.export_action = QAction("Export", self)
         self.export_action.triggered.connect(self.open_export_dialog)
         self.export_action.setEnabled(False)
@@ -131,6 +138,12 @@ class MainWindow(QMainWindow):
         self.settings_action = QAction("Settings", self)
         self.settings_action.triggered.connect(self.open_settings_dialog)
         file_menu.addAction(self.settings_action)  # always enabled - not tied to a loaded score
+
+        help_menu = menu_bar.addMenu("Help")
+
+        about_action = QAction("About", self)
+        about_action.triggered.connect(self.show_about_dialog)
+        help_menu.addAction(about_action)
 
     def _build_toolbar(self):
         toolbar = self.addToolBar("Main")
@@ -398,6 +411,42 @@ class MainWindow(QMainWindow):
 
     # --- Toolbar actions ---------------------------------------------------
 
+    def close_file(self):
+        if self.session is None:
+            return
+
+        self.session = None
+        self.loaded_file_path = None
+        self.session_file_path = None
+        self.check_order = []
+
+        self.tree.clear()
+
+        self.export_action.setEnabled(False)
+        self.auto_merge_action.setEnabled(False)
+        self.merge_accents_action.setEnabled(False)
+        self.save_session_action.setEnabled(False)
+        self.save_session_as_action.setEnabled(False)
+        self.close_file_action.setEnabled(False)
+        self.merge_action.setEnabled(False)
+        self.rename_action.setEnabled(False)
+
+        self.central_stack.setCurrentWidget(self.empty_state_widget)
+        self.statusBar().showMessage("Closed file", 3000)
+
+    def show_about_dialog(self):
+        from PyQt6.QtCore import QT_VERSION_STR
+
+        QMessageBox.about(
+            self,
+            "About MidiDivisi",
+            "<h3>MidiDivisi</h3>"
+            "<p>Created by Midori Builds</p>"
+            "<p><a href='https://github.com/midori-builds/MidiDivisi'>"
+            "github.com/midori-builds/MidiDivisi</a></p>"
+            f"<p>Qt version: {QT_VERSION_STR}</p>",
+        )
+
     def load_musicxml(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -431,6 +480,7 @@ class MainWindow(QMainWindow):
         self.merge_accents_action.setEnabled(True)
         self.save_session_action.setEnabled(True)
         self.save_session_as_action.setEnabled(True)
+        self.close_file_action.setEnabled(True)
 
         self.refresh_tree()
         self.central_stack.setCurrentWidget(self.tree)
@@ -496,6 +546,7 @@ class MainWindow(QMainWindow):
         self.merge_accents_action.setEnabled(True)
         self.save_session_action.setEnabled(True)
         self.save_session_as_action.setEnabled(True)
+        self.close_file_action.setEnabled(True)
 
         self.refresh_tree()
         self.central_stack.setCurrentWidget(self.tree)
