@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QPushButton,
+    QCheckBox,
 )
 
 from mididivisi.core.parser import load_score
@@ -47,10 +48,14 @@ from mididivisi.core.session import Session
 from mididivisi.core import session_file
 from mididivisi.ui.export_dialog import ExportDialog
 from mididivisi.ui.settings_dialog import SettingsDialog
+from mididivisi.ui.profile_manager import ProfileManagerWindow
+from mididivisi.ui.profile_picker_dialog import ProfilePickerDialog
 
 # Tree column indices
 COL_NAME = 0
 COL_MERGED = 1
+COL_PROFILE = 2
+COL_KS = 3
 
 # Explicit fixed row height - see the matching comment in
 # export_dialog.py for why this is needed (Qt/QSS row-height drift on
@@ -74,6 +79,7 @@ class MainWindow(QMainWindow):
         self.session = None
         self.loaded_file_path = None
         self.session_file_path = None
+        self.profile_manager_window = None  # created lazily on first open, then reused
 
         # Chronological list of currently-checked QTreeWidgetItems -
         # tracked explicitly (not derived by re-scanning the tree)
@@ -139,6 +145,12 @@ class MainWindow(QMainWindow):
         self.settings_action.triggered.connect(self.open_settings_dialog)
         file_menu.addAction(self.settings_action)  # always enabled - not tied to a loaded score
 
+        profiles_menu = menu_bar.addMenu("Profiles")
+
+        profile_manager_action = QAction("Profile Manager", self)
+        profile_manager_action.triggered.connect(self.open_profile_manager)
+        profiles_menu.addAction(profile_manager_action)  # always enabled - not tied to a loaded score
+
         help_menu = menu_bar.addMenu("Help")
 
         about_action = QAction("About", self)
@@ -192,7 +204,7 @@ class MainWindow(QMainWindow):
 
     def _build_tree(self):
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Track", "Merged"])
+        self.tree.setHeaderLabels(["Track", "Merged", "Profile", "KS"])
         self.tree.setColumnWidth(COL_NAME, 500)
         # Checkboxes are the selection mechanism here, not native row
         # highlighting - disable native selection so the two don't
@@ -271,6 +283,30 @@ class MainWindow(QMainWindow):
                     i.name for i in instrument.identities
                 )
                 instrument_item.setToolTip(COL_MERGED, tooltip)
+
+            # Profile selection and KS toggle are only meaningful per
+            # INSTRUMENT (never per-group), so these two columns are
+            # only populated on the instrument row, via embedded real
+            # widgets (setItemWidget) rather than tree text/checkbox -
+            # a plain button/checkbox is a much simpler way to get
+            # click behavior on one specific cell than custom painting.
+            profile_button = QPushButton(
+                instrument.profile.name if instrument.profile else "Click to select profile"
+            )
+            profile_button.clicked.connect(
+                lambda _, i=instrument: self.open_profile_picker(i)
+            )
+            self.tree.setItemWidget(instrument_item, COL_PROFILE, profile_button)
+
+            ks_checkbox = QCheckBox("KS")
+            ks_checkbox.setChecked(instrument.keyswitch_enabled)
+            ks_checkbox.setEnabled(
+                instrument.profile is not None and instrument.profile.has_keyswitches
+            )
+            ks_checkbox.toggled.connect(
+                lambda checked, i=instrument: self.on_keyswitch_toggled(i, checked)
+            )
+            self.tree.setItemWidget(instrument_item, COL_KS, ks_checkbox)
 
             for group in instrument.groups:
                 group_item = QTreeWidgetItem(instrument_item)
@@ -731,4 +767,44 @@ class MainWindow(QMainWindow):
         # not retroactively on an already-loaded session.
         dialog = SettingsDialog(parent=self)
         dialog.exec()
+
+    def open_profile_manager(self):
+        # Kept as an instance attribute (not a local variable) - a
+        # standalone, non-modal QMainWindow with no other reference
+        # holder would otherwise be garbage-collected the moment this
+        # method returns, closing the window immediately. Reused
+        # across multiple opens rather than creating a new instance
+        # every time, so it doesn't lose whatever the user had
+        # selected/expanded last time they had it open.
+        if self.profile_manager_window is None:
+            self.profile_manager_window = ProfileManagerWindow(parent=self)
+        self.profile_manager_window.show()
+        self.profile_manager_window.raise_()
+        self.profile_manager_window.activateWindow()
+
+    def open_profile_picker(self, instrument):
+        dialog = ProfilePickerDialog(instrument.name, instrument.profile, parent=self)
+        result = dialog.exec()
+
+        if dialog.open_manager_requested:
+            self.open_profile_manager()
+            return
+
+        if result != dialog.DialogCode.Accepted:
+            return  # cancelled
+
+        if dialog.clear_requested:
+            instrument.profile = None
+            instrument.keyswitch_enabled = False
+            self.statusBar().showMessage(f"Cleared profile from: {instrument.name}", 4000)
+        elif dialog.selected_profile is not None:
+            self.session.apply_profile(instrument.id, dialog.selected_profile)
+            self.statusBar().showMessage(
+                f"Applied profile '{dialog.selected_profile.name}' to: {instrument.name}", 4000
+            )
+
+        self.refresh_tree()
+
+    def on_keyswitch_toggled(self, instrument, checked):
+        instrument.keyswitch_enabled = checked
 

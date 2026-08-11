@@ -177,6 +177,14 @@ class Instrument:
         self.identities = list(identities)
         self.groups = list(groups)
         self.included = True
+        # Profile assignment (see core/profiles.py). None until the
+        # user explicitly assigns one via the Select Profile picker -
+        # never inferred/auto-assigned. keyswitch_enabled only means
+        # anything if self.profile is set AND has at least one
+        # keyswitch defined (Profile.has_keyswitches) - the UI's KS
+        # toggle is meant to be disabled otherwise.
+        self.profile = None
+        self.keyswitch_enabled = False
 
     @property
     def is_merged(self):
@@ -456,6 +464,75 @@ class Session:
             new_instruments.append(new_instrument)
 
         return new_instruments
+
+    def apply_profile(self, instrument_id, profile):
+        """Apply a Profile (see core/profiles.py) to one Instrument:
+        rebuild its groups from scratch according to the profile's
+        articulation inventory, and record the assignment.
+
+        Only ever touches instrument.groups - NEVER instrument.identities
+        or self.instruments. This is deliberate: it's what guarantees
+        applying a profile can never un-merge an already-merged
+        instrument (e.g. a merged pair of grand-staff Harps), since
+        instrument-merge structure and group-level organization are
+        two independent axes in this data model, and profile
+        application only ever operates on the second one.
+
+        Every currently-owned Track (regardless of which Group it's
+        presently in, or how it got there) is gathered up first, then
+        re-sorted: a Track matching one of the profile's inventory
+        items (via its permanent, unrenameable .label) joins that
+        item's group, named after the LIBRARY'S bucket name (e.g.
+        "Violin I - Short") - NOT the "first-selected wins" naming
+        rule manual merges use, since the whole point of a profile is
+        imposing the library's own naming. Any track matching no
+        inventory item becomes its own single-track group again,
+        keeping whatever name it already had.
+
+        This is a genuine override, per design: reapplying a profile
+        (or applying a different one) always rebuilds groups from
+        scratch, discarding whatever manual group-level merging/
+        renaming existed before. instrument.keyswitch_enabled is also
+        reset to False - a fresh profile assignment doesn't inherit
+        the previous profile's keyswitch toggle state.
+        """
+        instrument = next((i for i in self.instruments if i.id == instrument_id), None)
+        if instrument is None:
+            raise ValueError(f"No instrument with id {instrument_id}")
+
+        all_tracks = []
+        for group in instrument.groups:
+            all_tracks.extend(group.tracks)
+
+        # label -> matching InventoryItem, built once for O(1) lookup
+        # instead of re-scanning every item's matched_labels per track.
+        label_to_item = {}
+        for item in profile.inventory:
+            for label in item.matched_labels:
+                label_to_item[label] = item
+
+        tracks_by_item_id = {}
+        unmatched_tracks = []
+
+        for track in all_tracks:
+            item = label_to_item.get(track.label)
+            if item is None:
+                unmatched_tracks.append(track)
+            else:
+                tracks_by_item_id.setdefault(item.id, []).append(track)
+
+        new_groups = []
+        for item in profile.inventory:
+            matched = tracks_by_item_id.get(item.id)
+            if matched:
+                new_groups.append(Group(f"{instrument.name} - {item.name}", matched))
+
+        for track in unmatched_tracks:
+            new_groups.append(Group(track.name, [track]))
+
+        instrument.groups = new_groups
+        instrument.profile = profile
+        instrument.keyswitch_enabled = False
 
     def merge_accent_variants(self):
         """Auto-merge any single-track group whose raw articulation

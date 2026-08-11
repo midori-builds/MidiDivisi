@@ -49,3 +49,4 @@ htmlcov/
 # *.mid
 settings.json
 .DS_Store
+profiles.json
