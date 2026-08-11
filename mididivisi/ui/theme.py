@@ -180,6 +180,31 @@ def build_stylesheet():
             background: {c['hover']};
         }}
 
+        QComboBox {{
+            background: {c['bg_content']};
+            color: {c['text']};
+            border: 1px solid {c['border']};
+            border-radius: 4px;
+            padding: 4px 6px;
+        }}
+
+        QComboBox:focus {{
+            border: 1px solid {c['accent']};
+        }}
+
+        QComboBox::drop-down {{
+            border-left: 1px solid {c['border']};
+            width: 20px;
+        }}
+
+        QComboBox QAbstractItemView {{
+            background: {c['bg_content']};
+            color: {c['text']};
+            border: 1px solid {c['border']};
+            selection-background-color: {c['accent']};
+            selection-color: {c['accent_text']};
+        }}
+
         QListWidget {{
             background: {c['bg_content']};
             color: {c['text']};

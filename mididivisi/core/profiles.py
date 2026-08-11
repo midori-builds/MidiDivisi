@@ -41,6 +41,40 @@ from mididivisi.core.settings import PROJECT_ROOT
 
 PROFILES_PATH = os.path.join(PROJECT_ROOT, "profiles.json")
 
+# Default keyswitch note assigned to every inventory item when a
+# profile's keyswitching is first turned on. MIDI note 60 is
+# universally Middle C, but which NAME software gives that note
+# varies (C3, C4, or C5 depending on convention) - this uses the
+# "Middle C = C3" convention (Kontakt/Cubase and most sampler-adjacent
+# software default to this), so this note is displayed/named as "C2".
+# The exact default matters less than being able to SEE the actual
+# note name in the UI rather than a bare number - see
+# midi_note_name() below, which is what makes that possible - so the
+# user can always look at and adjust to whatever specific note they
+# actually mean, regardless of any convention mismatch.
+DEFAULT_KEYSWITCH_NOTE = 48
+
+_NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+
+def midi_note_name(note_number):
+    """Human-readable name for a MIDI note number (0-127), e.g. 48 ->
+    "C2". Uses the "Middle C = C3" convention (see
+    DEFAULT_KEYSWITCH_NOTE above) - octave = (note_number // 12) - 2,
+    so MIDI 60 (Middle C) reads as "C3".
+    """
+    pitch_class = _NOTE_NAMES[note_number % 12]
+    octave = (note_number // 12) - 2
+    return f"{pitch_class}{octave}"
+
+
+def all_midi_note_names():
+    """(name, note_number) pairs for every valid MIDI note (0-127), in
+    ascending pitch order - built once for populating a note-picker
+    combo box rather than showing a raw numeric spinner.
+    """
+    return [(midi_note_name(n), n) for n in range(128)]
+
 
 class InventoryItem:
     """One bucket in a library's articulation inventory (e.g. "Short").
@@ -53,7 +87,9 @@ class InventoryItem:
         self.id = str(uuid.uuid4())
         self.name = name  # mutable, user-editable
         self.matched_labels = []  # list of our internal articulation label strings
-        self.keyswitch_note = None  # MIDI note number, or None (default)
+        self.keyswitch_note = None  # MIDI note number, or None (default) - only
+                                     # meaningful while the owning Profile's
+                                     # keyswitch_enabled is True
 
     def to_dict(self):
         return {
@@ -79,21 +115,33 @@ class Profile:
     """One instrument's worth of library-specific setup. `name` is
     typically the instrument's name (e.g. "Violin I"), but is free
     text - nothing enforces it matching an actual instrument.
+
+    Keyswitching is enabled/disabled at the PROFILE level
+    (`keyswitch_enabled`), not per articulation - toggling it on
+    assigns DEFAULT_KEYSWITCH_NOTE to every inventory item at once
+    (all the same note, for now - auto-incrementing per item is a
+    planned future feature, not built yet). Individual items' notes
+    can still be adjusted afterward; the profile-level flag just gates
+    whether keyswitching is in play for this profile at all, and is
+    what `has_keyswitches` reports (used by Instrument's KS toggle in
+    the main tree to decide whether that toggle should even be shown).
     """
 
     def __init__(self, name):
         self.id = str(uuid.uuid4())
         self.name = name  # mutable, user-editable
         self.inventory = []  # list of InventoryItem, in display order
+        self.keyswitch_enabled = False
 
     @property
     def has_keyswitches(self):
-        return any(item.keyswitch_note is not None for item in self.inventory)
+        return self.keyswitch_enabled
 
     def to_dict(self):
         return {
             "id": self.id,
             "name": self.name,
+            "keyswitch_enabled": self.keyswitch_enabled,
             "inventory": [item.to_dict() for item in self.inventory],
         }
 
@@ -101,6 +149,7 @@ class Profile:
     def from_dict(cls, data):
         profile = cls(data["name"])
         profile.id = data["id"]
+        profile.keyswitch_enabled = data.get("keyswitch_enabled", False)
         profile.inventory = [InventoryItem.from_dict(d) for d in data.get("inventory", [])]
         return profile
 

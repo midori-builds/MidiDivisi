@@ -123,6 +123,14 @@ class Group:
         self.name = name
         self.tracks = list(tracks)  # one or more Track objects
         self.included = True
+        # Set by Session.apply_profile when this group was formed from
+        # a profile's inventory bucket - the InventoryItem (from
+        # core/profiles.py) it corresponds to, or None for groups not
+        # tied to any profile bucket (manual merges, unmatched
+        # tracks). Lets the UI show that item's keyswitch note without
+        # re-deriving the label-matching logic apply_profile already
+        # did.
+        self.profile_item = None
 
     @property
     def is_merged(self):
@@ -525,7 +533,9 @@ class Session:
         for item in profile.inventory:
             matched = tracks_by_item_id.get(item.id)
             if matched:
-                new_groups.append(Group(f"{instrument.name} - {item.name}", matched))
+                new_group = Group(f"{instrument.name} - {item.name}", matched)
+                new_group.profile_item = item
+                new_groups.append(new_group)
 
         for track in unmatched_tracks:
             new_groups.append(Group(track.name, [track]))

@@ -50,6 +50,7 @@ from mididivisi.ui.export_dialog import ExportDialog
 from mididivisi.ui.settings_dialog import SettingsDialog
 from mididivisi.ui.profile_manager import ProfileManagerWindow
 from mididivisi.ui.profile_picker_dialog import ProfilePickerDialog
+from mididivisi.core.profiles import midi_note_name
 
 # Tree column indices
 COL_NAME = 0
@@ -60,7 +61,13 @@ COL_KS = 3
 # Explicit fixed row height - see the matching comment in
 # export_dialog.py for why this is needed (Qt/QSS row-height drift on
 # repeated collapse/expand) and why width must be 0, not -1.
-ROW_HEIGHT = 26
+ROW_HEIGHT = 32
+
+# Instrument rows carry an embedded button + checkbox and need more
+# vertical breathing room than plain-text group rows - using one
+# uniform height for both was cramping the button/checkbox against
+# the row edges.
+INSTRUMENT_ROW_HEIGHT = 44
 
 
 class MainWindow(QMainWindow):
@@ -206,6 +213,7 @@ class MainWindow(QMainWindow):
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Track", "Merged", "Profile", "KS"])
         self.tree.setColumnWidth(COL_NAME, 500)
+        self.tree.setColumnWidth(COL_PROFILE, 200)
         # Checkboxes are the selection mechanism here, not native row
         # highlighting - disable native selection so the two don't
         # visually compete with each other.
@@ -275,7 +283,7 @@ class MainWindow(QMainWindow):
             instrument_item.setCheckState(COL_NAME, Qt.CheckState.Unchecked)
             instrument_item.setText(COL_NAME, instrument.name)
             instrument_item.setData(COL_NAME, Qt.ItemDataRole.UserRole, ("instrument", instrument))
-            instrument_item.setSizeHint(COL_NAME, QSize(0, ROW_HEIGHT))
+            instrument_item.setSizeHint(COL_NAME, QSize(0, INSTRUMENT_ROW_HEIGHT))
 
             if instrument.is_merged:
                 instrument_item.setText(COL_MERGED, "M")
@@ -290,23 +298,52 @@ class MainWindow(QMainWindow):
             # widgets (setItemWidget) rather than tree text/checkbox -
             # a plain button/checkbox is a much simpler way to get
             # click behavior on one specific cell than custom painting.
+            #
+            # setItemWidget stretches whatever widget it's given to
+            # fill the ENTIRE row height, ignoring that widget's own
+            # setFixedHeight - confirmed directly (growing the row
+            # grew the button along with it, not just the row). The
+            # fix is to embed a WRAPPER with vertical stretch above/
+            # below the real control, so the wrapper absorbs the
+            # forced stretch instead of the button/checkbox itself.
+            fixed_height = INSTRUMENT_ROW_HEIGHT - 16
+
             profile_button = QPushButton(
                 instrument.profile.name if instrument.profile else "Click to select profile"
             )
+            profile_button.setFixedHeight(fixed_height)
             profile_button.clicked.connect(
                 lambda _, i=instrument: self.open_profile_picker(i)
             )
-            self.tree.setItemWidget(instrument_item, COL_PROFILE, profile_button)
+            profile_wrapper = QWidget()
+            profile_wrapper.setStyleSheet("background: transparent;")
+            profile_layout = QVBoxLayout(profile_wrapper)
+            profile_layout.setContentsMargins(0, 0, 0, 0)
+            profile_layout.addStretch(1)
+            profile_layout.addWidget(profile_button)
+            profile_layout.addStretch(1)
+            self.tree.setItemWidget(instrument_item, COL_PROFILE, profile_wrapper)
 
-            ks_checkbox = QCheckBox("KS")
-            ks_checkbox.setChecked(instrument.keyswitch_enabled)
-            ks_checkbox.setEnabled(
-                instrument.profile is not None and instrument.profile.has_keyswitches
-            )
-            ks_checkbox.toggled.connect(
-                lambda checked, i=instrument: self.on_keyswitch_toggled(i, checked)
-            )
-            self.tree.setItemWidget(instrument_item, COL_KS, ks_checkbox)
+            # KS is only shown at all when it's actually applicable -
+            # HIDDEN, not just disabled, when no profile is assigned
+            # or the assigned profile has no keyswitch defined. An
+            # empty cell reads more clearly than a permanently-greyed-
+            # out control for something that isn't in play.
+            if instrument.profile is not None and instrument.profile.has_keyswitches:
+                ks_checkbox = QCheckBox("KS")
+                ks_checkbox.setFixedHeight(fixed_height)
+                ks_checkbox.setChecked(instrument.keyswitch_enabled)
+                ks_checkbox.toggled.connect(
+                    lambda checked, i=instrument: self.on_keyswitch_toggled(i, checked)
+                )
+                ks_wrapper = QWidget()
+                ks_wrapper.setStyleSheet("background: transparent;")
+                ks_layout = QVBoxLayout(ks_wrapper)
+                ks_layout.setContentsMargins(0, 0, 0, 0)
+                ks_layout.addStretch(1)
+                ks_layout.addWidget(ks_checkbox)
+                ks_layout.addStretch(1)
+                self.tree.setItemWidget(instrument_item, COL_KS, ks_wrapper)
 
             for group in instrument.groups:
                 group_item = QTreeWidgetItem(instrument_item)
@@ -326,6 +363,21 @@ class MainWindow(QMainWindow):
                         t.name for t in group.tracks
                     )
                     group_item.setToolTip(COL_MERGED, tooltip)
+
+                # Show the keyswitch note for this specific
+                # articulation - but ONLY when the instrument's own KS
+                # export toggle is actually on, not just whenever the
+                # profile theoretically supports keyswitching. Showing
+                # a note that isn't actually going to be used at
+                # export would be misleading.
+                if (
+                    group.profile_item is not None
+                    and instrument.profile is not None
+                    and instrument.profile.keyswitch_enabled
+                    and instrument.keyswitch_enabled
+                    and group.profile_item.keyswitch_note is not None
+                ):
+                    group_item.setText(COL_KS, midi_note_name(group.profile_item.keyswitch_note))
 
         self.tree.expandAll()
         self.tree.blockSignals(False)
@@ -468,7 +520,27 @@ class MainWindow(QMainWindow):
         self.rename_action.setEnabled(False)
 
         self.central_stack.setCurrentWidget(self.empty_state_widget)
+        self._update_window_title()
         self.statusBar().showMessage("Closed file", 3000)
+
+    def _update_window_title(self):
+        """A session file (if one is associated) takes priority over
+        the raw MusicXML filename - once a session's been saved to or
+        loaded from a .mididivisi file, that's "the file" as far as
+        the user is concerned, even though loaded_file_path also
+        still points at the underlying score. Session names show
+        without their extension; MusicXML names show with theirs (the
+        distinction requested: "Song.mxml" style for a bare import,
+        just the session name with no extension once it's a session).
+        """
+        if self.session_file_path:
+            base = os.path.splitext(os.path.basename(self.session_file_path))[0]
+            self.setWindowTitle(f"MidiDivisi - {base}")
+        elif self.loaded_file_path:
+            base = os.path.basename(self.loaded_file_path)
+            self.setWindowTitle(f"MidiDivisi - {base}")
+        else:
+            self.setWindowTitle("MidiDivisi")
 
     def show_about_dialog(self):
         from PyQt6.QtCore import QT_VERSION_STR
@@ -520,6 +592,7 @@ class MainWindow(QMainWindow):
 
         self.refresh_tree()
         self.central_stack.setCurrentWidget(self.tree)
+        self._update_window_title()
         self.statusBar().showMessage(
             f"Loaded: {os.path.basename(file_path)} "
             f"({len(self.session.instruments)} instrument(s), "
@@ -586,6 +659,7 @@ class MainWindow(QMainWindow):
 
         self.refresh_tree()
         self.central_stack.setCurrentWidget(self.tree)
+        self._update_window_title()
 
         message = f"Opened session: {os.path.basename(file_path)}"
         if warnings:
@@ -649,6 +723,7 @@ class MainWindow(QMainWindow):
             return
 
         self.session_file_path = file_path
+        self._update_window_title()
         self.statusBar().showMessage(f"Session saved: {os.path.basename(file_path)}", 5000)
 
     def merge_selected(self):
@@ -778,9 +853,19 @@ class MainWindow(QMainWindow):
         # selected/expanded last time they had it open.
         if self.profile_manager_window is None:
             self.profile_manager_window = ProfileManagerWindow(parent=self)
+            self.profile_manager_window.profiles_changed.connect(self.on_profiles_changed)
         self.profile_manager_window.show()
         self.profile_manager_window.raise_()
         self.profile_manager_window.activateWindow()
+
+    def on_profiles_changed(self):
+        """Called whenever the Profile Manager (a separate window)
+        saves any change - keeps the main tree from going stale (e.g.
+        showing a KS checkbox as absent when a profile's keyswitching
+        was just turned on elsewhere). No-op if nothing's loaded.
+        """
+        if self.session is not None:
+            self.refresh_tree()
 
     def open_profile_picker(self, instrument):
         dialog = ProfilePickerDialog(instrument.name, instrument.profile, parent=self)
@@ -807,4 +892,9 @@ class MainWindow(QMainWindow):
 
     def on_keyswitch_toggled(self, instrument, checked):
         instrument.keyswitch_enabled = checked
+        # Refresh so the group rows' KS-column note-name display
+        # (gated on this same flag) updates immediately, rather than
+        # staying stale until some unrelated action happens to
+        # trigger a rebuild.
+        self.refresh_tree()
 

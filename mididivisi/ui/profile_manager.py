@@ -14,7 +14,7 @@ Keyword Matching (for whichever inventory item is currently
 selected), and a Keyswitch editor (also for the selected item).
 """
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -29,7 +29,6 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QComboBox,
     QCheckBox,
-    QSpinBox,
     QInputDialog,
     QMessageBox,
     QFileDialog,
@@ -45,6 +44,8 @@ from mididivisi.core.profiles import (
     import_collection,
     export_profile,
     import_profile,
+    DEFAULT_KEYSWITCH_NOTE,
+    all_midi_note_names,
 )
 
 # Curated preset labels for the Keyword Matching "Add" combo box. Our
@@ -84,6 +85,14 @@ TREE_ROLE = Qt.ItemDataRole.UserRole
 
 
 class ProfileManagerWindow(QMainWindow):
+    # Emitted whenever anything is saved here (rename, inventory edit,
+    # keyword match, keyswitch change, delete, import...) - the main
+    # window listens for this and refreshes its own tree, since
+    # editing a profile in this separate window otherwise has no way
+    # to tell the main window its displayed state (e.g. whether the KS
+    # column should show) has gone stale.
+    profiles_changed = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Profile Manager")
@@ -94,6 +103,15 @@ class ProfileManagerWindow(QMainWindow):
 
         self._build_ui()
         self._refresh_collection_tree()
+
+    def _save(self):
+        """Centralized save - EVERY mutation in this window should go
+        through this instead of calling library.save() directly, so
+        the profiles_changed signal can never be forgotten at a new
+        call site.
+        """
+        library.save()
+        self.profiles_changed.emit()
 
     # --- UI construction -------------------------------------------------
 
@@ -217,22 +235,38 @@ class ProfileManagerWindow(QMainWindow):
         layout.addLayout(panels_row)
 
         # --- Keyswitch editor ---
-        keyswitch_row = QHBoxLayout()
-        keyswitch_row.addWidget(QLabel("Keyswitch:"))
+        # Redesigned: keyswitching is enabled/disabled at the PROFILE
+        # level (one checkbox for the whole profile), not per
+        # articulation - toggling it on assigns DEFAULT_KEYSWITCH_NOTE
+        # to every inventory item at once. The per-item note selector
+        # below is only about WHICH note the currently-selected item
+        # uses (adjustable after the fact) - it's hidden entirely
+        # (not just disabled) when the profile checkbox is off, since
+        # showing a note selector for a feature that isn't active is
+        # more confusing than showing nothing.
+        self.profile_keyswitch_checkbox = QCheckBox("Keyswitch on Profile")
+        self.profile_keyswitch_checkbox.toggled.connect(self.on_profile_keyswitch_toggled)
+        layout.addWidget(self.profile_keyswitch_checkbox)
 
-        self.keyswitch_checkbox = QCheckBox("Enabled")
-        self.keyswitch_checkbox.toggled.connect(self.on_keyswitch_toggled)
-        keyswitch_row.addWidget(self.keyswitch_checkbox)
+        self.keyswitch_note_row = QWidget()
+        keyswitch_row = QHBoxLayout(self.keyswitch_note_row)
+        keyswitch_row.setContentsMargins(0, 0, 0, 0)
+        keyswitch_row.addWidget(QLabel("Note for selected articulation:"))
 
-        self.keyswitch_spin = QSpinBox()
-        self.keyswitch_spin.setRange(0, 127)
-        self.keyswitch_spin.setFixedSize(90, 28)
-        self.keyswitch_spin.setEnabled(False)
-        self.keyswitch_spin.valueChanged.connect(self.on_keyswitch_note_changed)
-        keyswitch_row.addWidget(self.keyswitch_spin)
+        # A note-NAME picker, not a raw number spinner - a bare MIDI
+        # integer means nothing to a composer at a glance. Populated
+        # once with every valid note (0-127) shown as e.g. "C2", MIDI
+        # number kept as each entry's item data.
+        self.keyswitch_combo = QComboBox()
+        for name, note_number in all_midi_note_names():
+            self.keyswitch_combo.addItem(name, note_number)
+        self.keyswitch_combo.setFixedWidth(90)
+        self.keyswitch_combo.currentIndexChanged.connect(self.on_keyswitch_note_changed)
+        keyswitch_row.addWidget(self.keyswitch_combo)
 
         keyswitch_row.addStretch(1)
-        layout.addLayout(keyswitch_row)
+        layout.addWidget(self.keyswitch_note_row)
+        self.keyswitch_note_row.setVisible(False)
 
         layout.addStretch(1)
 
@@ -243,9 +277,9 @@ class ProfileManagerWindow(QMainWindow):
         self.inventory_list.setEnabled(enabled)
         self.matching_list.setEnabled(enabled)
         self.matching_combo.setEnabled(enabled)
-        self.keyswitch_checkbox.setEnabled(enabled)
+        self.profile_keyswitch_checkbox.setEnabled(enabled)
         if not enabled:
-            self.keyswitch_spin.setEnabled(False)
+            self.keyswitch_note_row.setVisible(False)
 
     # --- Tree population ---------------------------------------------------
 
@@ -301,17 +335,31 @@ class ProfileManagerWindow(QMainWindow):
                 self.matching_list.addItem(label)
 
     def _refresh_keyswitch_editor(self):
-        self.keyswitch_checkbox.blockSignals(True)
-        self.keyswitch_spin.blockSignals(True)
-        if self.current_item and self.current_item.keyswitch_note is not None:
-            self.keyswitch_checkbox.setChecked(True)
-            self.keyswitch_spin.setEnabled(True)
-            self.keyswitch_spin.setValue(self.current_item.keyswitch_note)
+        """Two levels: the profile-level checkbox reflects
+        self.current_profile.keyswitch_enabled. The per-item note row
+        is only shown at all when that's True - hidden entirely
+        otherwise, not just disabled - and when shown, reflects the
+        currently-selected inventory item's own note.
+        """
+        self.profile_keyswitch_checkbox.blockSignals(True)
+        if self.current_profile:
+            self.profile_keyswitch_checkbox.setChecked(self.current_profile.keyswitch_enabled)
         else:
-            self.keyswitch_checkbox.setChecked(False)
-            self.keyswitch_spin.setEnabled(False)
-        self.keyswitch_checkbox.blockSignals(False)
-        self.keyswitch_spin.blockSignals(False)
+            self.profile_keyswitch_checkbox.setChecked(False)
+        self.profile_keyswitch_checkbox.blockSignals(False)
+
+        show_note_row = bool(self.current_profile and self.current_profile.keyswitch_enabled
+                              and self.current_item)
+        self.keyswitch_note_row.setVisible(show_note_row)
+
+        if show_note_row:
+            self.keyswitch_combo.blockSignals(True)
+            note = self.current_item.keyswitch_note
+            note = note if note is not None else DEFAULT_KEYSWITCH_NOTE
+            index = self.keyswitch_combo.findData(note)
+            if index >= 0:
+                self.keyswitch_combo.setCurrentIndex(index)
+            self.keyswitch_combo.blockSignals(False)
 
     # --- Tree selection / editing ------------------------------------------
 
@@ -353,7 +401,7 @@ class ProfileManagerWindow(QMainWindow):
         new_text = item.text(0)
         if new_text and new_text != obj.name:
             obj.name = new_text
-            library.save()
+            self._save()
             if kind == "profile" and self.current_profile is obj:
                 self.profile_name_label.setText(f"Profile: {obj.name}")
 
@@ -378,7 +426,7 @@ class ProfileManagerWindow(QMainWindow):
 
         new_profile = Profile(text.strip())
         collection.profiles.append(new_profile)
-        library.save()
+        self._save()
         self._refresh_collection_tree(select_id=new_profile.id)
 
     def delete_selected(self):
@@ -405,7 +453,7 @@ class ProfileManagerWindow(QMainWindow):
                 parent_collection.profiles = [
                     p for p in parent_collection.profiles if p.id != obj.id
                 ]
-                library.save()
+                self._save()
 
         self._refresh_collection_tree()
         self.on_tree_selection_changed()
@@ -419,7 +467,7 @@ class ProfileManagerWindow(QMainWindow):
         if not ok or not text.strip():
             return
         self.current_profile.inventory.append(InventoryItem(text.strip()))
-        library.save()
+        self._save()
         self._refresh_inventory_list()
 
     def remove_inventory_item(self):
@@ -432,7 +480,7 @@ class ProfileManagerWindow(QMainWindow):
         self.current_profile.inventory = [
             i for i in self.current_profile.inventory if i.id != item.id
         ]
-        library.save()
+        self._save()
         self._refresh_inventory_list()
         self.current_item = None
         self.matching_list.clear()
@@ -468,7 +516,7 @@ class ProfileManagerWindow(QMainWindow):
         if label not in self.current_item.matched_labels:
             self.current_item.matched_labels.append(label)
 
-        library.save()
+        self._save()
         self._refresh_matching_list()
 
     def remove_matched_label(self):
@@ -480,7 +528,7 @@ class ProfileManagerWindow(QMainWindow):
         label = selected[0].text()
         if label in self.current_item.matched_labels:
             self.current_item.matched_labels.remove(label)
-        library.save()
+        self._save()
         self._refresh_matching_list()
 
     def auto_add_matches(self):
@@ -513,7 +561,7 @@ class ProfileManagerWindow(QMainWindow):
             if label not in self.current_item.matched_labels:
                 self.current_item.matched_labels.append(label)
 
-        library.save()
+        self._save()
         self._refresh_matching_list()
 
         if not matches:
@@ -523,18 +571,31 @@ class ProfileManagerWindow(QMainWindow):
 
     # --- Keyswitch -----------------------------------------------------------
 
-    def on_keyswitch_toggled(self, checked):
-        if not self.current_item:
+    def on_profile_keyswitch_toggled(self, checked):
+        if not self.current_profile:
             return
-        self.keyswitch_spin.setEnabled(checked)
-        self.current_item.keyswitch_note = self.keyswitch_spin.value() if checked else None
-        library.save()
 
-    def on_keyswitch_note_changed(self, value):
-        if not self.current_item or not self.keyswitch_checkbox.isChecked():
+        self.current_profile.keyswitch_enabled = checked
+
+        if checked:
+            # Assign the same default note to EVERY inventory item at
+            # once - not incrementing per item yet (auto-keyswitch,
+            # planned but not built). Individual notes can still be
+            # adjusted afterward via the per-item selector.
+            for item in self.current_profile.inventory:
+                item.keyswitch_note = DEFAULT_KEYSWITCH_NOTE
+
+        self._save()
+        self._refresh_keyswitch_editor()
+
+    def on_keyswitch_note_changed(self, index):
+        if not self.current_item or not self.current_profile or not self.current_profile.keyswitch_enabled:
             return
-        self.current_item.keyswitch_note = value
-        library.save()
+        note_number = self.keyswitch_combo.itemData(index)
+        if note_number is None:
+            return
+        self.current_item.keyswitch_note = note_number
+        self._save()
 
     # --- Export / Import -----------------------------------------------------
 
@@ -569,7 +630,7 @@ class ProfileManagerWindow(QMainWindow):
             QMessageBox.critical(self, "Import failed", str(e))
             return
         library.collections.append(collection)
-        library.save()
+        self._save()
         self._refresh_collection_tree(select_id=collection.id)
 
     def export_selected_profile(self):
@@ -610,5 +671,5 @@ class ProfileManagerWindow(QMainWindow):
             return
 
         target_collection.profiles.append(profile)
-        library.save()
+        self._save()
         self._refresh_collection_tree(select_id=profile.id)
