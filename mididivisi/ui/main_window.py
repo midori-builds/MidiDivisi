@@ -269,6 +269,13 @@ class MainWindow(QMainWindow):
         after load, merge, and split - anything that changes which
         Instruments/Groups exist or how they're named.
         """
+        # A full clear()+rebuild naturally resets scroll to the top,
+        # since a freshly-cleared widget has no scroll state at all -
+        # capture and restore it explicitly so routine actions (merge,
+        # KS toggle, etc.) don't keep kicking the view back to the top
+        # on a large score.
+        scroll_position = self.tree.verticalScrollBar().value()
+
         self.tree.blockSignals(True)  # avoid itemChanged firing while rebuilding
         self.tree.clear()
         self.check_order = []
@@ -382,6 +389,7 @@ class MainWindow(QMainWindow):
         self.tree.expandAll()
         self.tree.blockSignals(False)
         self.update_action_states()
+        self.tree.verticalScrollBar().setValue(scroll_position)
 
     # --- Selection (checkbox) bookkeeping ---------------------------------
 

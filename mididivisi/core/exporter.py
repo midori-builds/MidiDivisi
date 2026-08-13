@@ -11,9 +11,19 @@ import copy
 import os
 import re
 
-from music21 import instrument, stream
+from music21 import instrument as m21_instrument
+from music21 import note, stream
 
 from mididivisi.core.parser import get_part_articulation_groups
+
+# Keyswitch note-on duration/velocity when flattening a keyswitch-
+# enabled instrument into one track. The exact values don't matter
+# much functionally - just needs to be short (so it doesn't audibly
+# overlap the real notes it precedes) and non-zero velocity (a MIDI
+# note-on with velocity 0 is equivalent to a note-off per spec, which
+# would make the keyswitch invisible to some strict readers).
+KEYSWITCH_NOTE_DURATION = 0.1
+KEYSWITCH_NOTE_VELOCITY = 100
 
 
 def export_group_to_midi(notes, output_path):
@@ -45,7 +55,7 @@ def _build_midi_track(track_name, notes):
     # track_name meta event - music21's MIDI writer reads the name
     # from an Instrument object inserted into the stream instead.
     # Verified directly against exported bytes.
-    track_instrument = instrument.Instrument()
+    track_instrument = m21_instrument.Instrument()
     track_instrument.partName = track_name
     track.insert(0, track_instrument)
 
@@ -149,26 +159,91 @@ def export_score_to_midi_per_instrument(score, output_dir):
     return written_paths
 
 
-def export_session_to_midi(session, output_path):
-    """Export a Session's currently-included groups as ONE multi-track
-    MIDI file. Each Group becomes its own track, using the Group's
-    CURRENT name - which may be the original auto-generated label, a
-    user rename, or a merged-group name. This is what makes rename/
-    merge actually visible in the exported file, unlike the legacy
-    score-based export functions which always re-derive names fresh
-    from the score.
+def _flatten_instrument_with_keyswitches(instr):
+    """Combine an instrument's INCLUDED groups into ONE time-ordered
+    list of notes, with a keyswitch note-on inserted whenever the
+    active articulation bucket changes from one note to the next.
 
-    Groups with zero notes (shouldn't normally happen, but a merge of
-    two already-empty groups is theoretically possible) are skipped
-    rather than writing an empty track.
+    Groups with no profile_item (unmatched tracks, or tracks that
+    predate the assigned profile) are included in the flattened
+    output but never trigger a keyswitch insertion - there's no
+    bucket for them to switch to.
+
+    KNOWN LIMITATION, accepted rather than solved (see BACKLOG.md):
+    if two different groups have notes at the exact same offset (a
+    genuinely simultaneous multi-articulation moment), the inserted
+    keyswitch note-on could collide with real notes from the other
+    group at that same instant. Not addressed here.
+    """
+    timeline = []
+    for group in instr.groups:
+        if not group.included:
+            continue
+        for n in group.get_combined_notes():
+            timeline.append((n.offset, group, n))
+
+    timeline.sort(key=lambda entry: entry[0])
+
+    result_notes = []
+    current_group_id = None
+
+    for offset, group, n in timeline:
+        if group.id != current_group_id:
+            current_group_id = group.id
+            item = group.profile_item
+            if item is not None and item.keyswitch_note is not None:
+                ks_note = note.Note(midi=item.keyswitch_note, quarterLength=KEYSWITCH_NOTE_DURATION)
+                ks_note.offset = offset
+                ks_note.volume.velocity = KEYSWITCH_NOTE_VELOCITY
+                ks_note.volume.velocityIsRelative = False
+                result_notes.append(ks_note)
+        result_notes.append(n)
+
+    return result_notes
+
+
+def _build_instrument_export_tracks(instr):
+    """Decide, for one Instrument, whether it exports as one flattened
+    keyswitch track or as separate tracks per group (today's default
+    behavior) - shared by both export_session_to_midi and
+    export_session_to_midi_per_instrument so this decision only lives
+    in one place. Returns a list of (track_name, notes) tuples, notes
+    already filtered to non-empty.
+    """
+    keyswitching_active = (
+        instr.keyswitch_enabled
+        and instr.profile is not None
+        and instr.profile.keyswitch_enabled
+    )
+
+    if keyswitching_active:
+        notes = _flatten_instrument_with_keyswitches(instr)
+        return [(instr.name, notes)] if notes else []
+
+    tracks = [(g.name, g.get_combined_notes()) for g in instr.groups if g.included]
+    return [(name, notes) for name, notes in tracks if notes]
+
+
+def export_session_to_midi(session, output_path):
+    """Export a Session's currently-included instruments/groups as ONE
+    multi-track MIDI file. Each Group normally becomes its own track,
+    using the Group's CURRENT name (auto-generated label, a user
+    rename, or a merged-group name) - UNLESS an instrument has
+    keyswitching enabled (Instrument.keyswitch_enabled, plus its
+    assigned Profile also having keyswitch_enabled), in which case
+    that whole instrument becomes ONE flattened track with keyswitch
+    note-ons inserted (see _build_instrument_export_tracks).
+
+    Groups/tracks with zero notes are skipped rather than writing an
+    empty track.
     """
     out_score = stream.Score()
 
-    for group in session.get_export_groups():
-        notes = group.get_combined_notes()
-        if not notes:
+    for instr in session.instruments:
+        if not instr.included:
             continue
-        out_score.insert(0, _build_midi_track(group.name, notes))
+        for track_name, notes in _build_instrument_export_tracks(instr):
+            out_score.insert(0, _build_midi_track(track_name, notes))
 
     out_score.write("midi", fp=output_path)
 
@@ -176,10 +251,9 @@ def export_session_to_midi(session, output_path):
 def export_session_to_midi_per_instrument(session, output_dir):
     """Same idea as export_session_to_midi, but writes one MIDI file
     per Instrument into output_dir - one file per row shown in the
-    UI's instrument-header level, reflecting current names and any
-    instrument-level merges, since this now iterates session.instruments
-    directly rather than re-deriving instrument groupings from track
-    data.
+    UI's instrument-header level, reflecting current names, any
+    instrument-level merges, and keyswitch flattening where enabled
+    (see _build_instrument_export_tracks).
 
     Instrument names that repeat (e.g. two un-merged "Harp" instruments
     from a grand staff) get a numeric suffix so files don't silently
@@ -194,20 +268,16 @@ def export_session_to_midi_per_instrument(session, output_dir):
     written_paths = []
     used_filenames = {}
 
-    for instrument in session.instruments:
-        if not instrument.included:
+    for instr in session.instruments:
+        if not instr.included:
             continue
 
-        included_groups = [g for g in instrument.groups if g.included]
-        tracks_with_notes = [
-            (g.name, g.get_combined_notes()) for g in included_groups
-        ]
-        tracks_with_notes = [(name, notes) for name, notes in tracks_with_notes if notes]
+        tracks_with_notes = _build_instrument_export_tracks(instr)
 
         if not tracks_with_notes:
             continue  # nothing included/with notes for this instrument
 
-        base_filename = _sanitize_filename(instrument.name)
+        base_filename = _sanitize_filename(instr.name)
 
         count = used_filenames.get(base_filename, 0)
         used_filenames[base_filename] = count + 1

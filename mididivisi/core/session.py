@@ -321,11 +321,20 @@ class Session:
 
         new_group = Group(new_name, all_tracks)
 
+        # Insert at the position of the EARLIEST-positioned merged
+        # group, rather than appending at the end - this is what
+        # keeps a merge from jumping the result to the bottom of the
+        # tree. Safe to reuse that same index after filtering: nothing
+        # BEFORE the earliest merged item's position was removed, so
+        # its index in the list is unaffected by the removal.
         group_id_set = set(group_ids)
+        original_index = min(
+            i for i, g in enumerate(owning_instrument.groups) if g.id in group_id_set
+        )
         owning_instrument.groups = [
             g for g in owning_instrument.groups if g.id not in group_id_set
         ]
-        owning_instrument.groups.append(new_group)
+        owning_instrument.groups.insert(original_index, new_group)
 
         return new_group
 
@@ -333,6 +342,10 @@ class Session:
         """Dissolve a merged group back into one single-member group
         per original Track. Each resulting group shows that Track's
         own (persisted) name, and is included=True.
+
+        The resulting groups are inserted starting at the position the
+        merged group itself occupied, in track order - so splitting
+        doesn't scatter the results to the bottom of the tree either.
 
         Splitting a group that was never merged (only 1 track) is a
         no-op that just returns the group unchanged in a list, since
@@ -346,12 +359,13 @@ class Session:
             return [group]
 
         owning_instrument = self._find_owning_instrument(group)
+        original_index = owning_instrument.groups.index(group)
         owning_instrument.groups.remove(group)
 
         new_groups = []
-        for track in group.tracks:
+        for offset, track in enumerate(group.tracks):
             new_group = Group(track.name, [track])
-            owning_instrument.groups.append(new_group)
+            owning_instrument.groups.insert(original_index + offset, new_group)
             new_groups.append(new_group)
 
         return new_groups
@@ -418,11 +432,17 @@ class Session:
 
         new_instrument = Instrument(new_name, all_identities, new_groups)
 
+        # Same position-preserving approach as merge_groups - insert
+        # at the earliest-positioned merged instrument's spot, not at
+        # the end.
         instrument_id_set = set(instrument_ids)
+        original_index = min(
+            i for i, instr in enumerate(self.instruments) if instr.id in instrument_id_set
+        )
         self.instruments = [
             i for i in self.instruments if i.id not in instrument_id_set
         ]
-        self.instruments.append(new_instrument)
+        self.instruments.insert(original_index, new_instrument)
 
         return new_instrument
 
@@ -448,6 +468,7 @@ class Session:
         if not instrument.is_merged:
             return [instrument]
 
+        original_index = self.instruments.index(instrument)
         self.instruments.remove(instrument)
 
         resolved_groups = []
@@ -462,13 +483,13 @@ class Session:
                 resolved_groups.append(group)
 
         new_instruments = []
-        for identity in instrument.identities:
+        for offset, identity in enumerate(instrument.identities):
             owned_groups = [
                 g for g in resolved_groups
                 if g.tracks[0].instrument_identity.id == identity.id
             ]
             new_instrument = Instrument(identity.name, [identity], owned_groups)
-            self.instruments.append(new_instrument)
+            self.instruments.insert(original_index + offset, new_instrument)
             new_instruments.append(new_instrument)
 
         return new_instruments
