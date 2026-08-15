@@ -27,7 +27,7 @@ Three areas, per the current UI design:
 import os
 
 from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QColor
 from PyQt6.QtWidgets import (
     QMainWindow,
     QTreeWidget,
@@ -363,6 +363,17 @@ class MainWindow(QMainWindow):
                 group_item.setText(COL_NAME, group.name)
                 group_item.setData(COL_NAME, Qt.ItemDataRole.UserRole, ("group", group))
                 group_item.setSizeHint(COL_NAME, QSize(0, ROW_HEIGHT))
+
+                # Flag articulations the assigned profile doesn't
+                # cover - blue (not red, which would read as an error)
+                # with a tooltip explaining why. Reuses the theme's
+                # own accent blue for consistency rather than an
+                # arbitrary color. Only applies once a profile is
+                # actually assigned - an instrument with no profile at
+                # all has nothing to be "missing" from.
+                if instrument.profile is not None and group.profile_item is None:
+                    group_item.setForeground(COL_NAME, QColor("#3584E4"))
+                    group_item.setToolTip(COL_NAME, "Missing in profile")
 
                 if group.is_merged:
                     group_item.setText(COL_MERGED, "M")

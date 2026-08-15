@@ -323,6 +323,21 @@ class Session:
 
         new_group = Group(new_name, all_tracks)
 
+        # Propagate profile_item onto the merge result, independent of
+        # click order (unlike naming) - this is what makes "merge an
+        # unmatched articulation into a matched one" actually resolve
+        # anything, both visually (no longer flagged as missing) and
+        # functionally (correctly keyswitched at export) rather than
+        # just LOOKING resolved while still exporting as an unswitched
+        # separate track. If the merged groups agree on a single
+        # profile_item (or only one of them has one), the result
+        # inherits it. If they disagree (matched to two DIFFERENT
+        # buckets), that's genuinely ambiguous - stays unmatched
+        # rather than guessing.
+        distinct_items = {g.profile_item for g in ordered_groups if g.profile_item is not None}
+        if len(distinct_items) == 1:
+            new_group.profile_item = next(iter(distinct_items))
+
         # Insert at the position of the EARLIEST-positioned merged
         # group, rather than appending at the end - this is what
         # keeps a merge from jumping the result to the bottom of the
