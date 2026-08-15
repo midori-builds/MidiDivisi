@@ -41,7 +41,7 @@ Groups are currently owned by which Instrument.
 
 import uuid
 
-from mididivisi.core.parser import get_part_articulation_groups
+from mididivisi.core.parser import get_part_articulation_groups, get_tempo_timeline
 
 
 class Track:
@@ -229,6 +229,7 @@ class Session:
         self.tracks = []
         self.instrument_identities = []
         self.instruments = []
+        self.tempo_events = []  # (offset, bpm) pairs, score-level - see parser.get_tempo_timeline
 
     @property
     def groups(self):
@@ -247,6 +248,7 @@ class Session:
         explicit "no auto-merge on load" decision.
         """
         session = cls()
+        session.tempo_events = get_tempo_timeline(score)
         occurrence_counts = {}  # original_name -> how many seen so far, for natural_key
 
         for part in score.parts:

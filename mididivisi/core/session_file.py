@@ -194,6 +194,7 @@ def finish_loading_session(load_result, use_saved_settings):
     new_session = Session()
     new_session.tracks = fresh_session.tracks
     new_session.instrument_identities = fresh_session.instrument_identities
+    new_session.tempo_events = fresh_session.tempo_events
 
     for instr_data in load_result.session_data["instruments"]:
         identities = []

@@ -92,6 +92,58 @@ def load_score(file_path):
     return score
 
 
+DEFAULT_TEMPO_BPM = 120
+
+
+def get_tempo_timeline(score):
+    """Scan the WHOLE score (every part, not just one) for tempo
+    markings and return a list of (offset, bpm) events, sorted by
+    offset, deduplicated by offset. Tempo is score-level, not per-
+    instrument - a tempo marking is usually only written on ONE staff
+    but applies to the whole piece, so unlike the other timeline
+    functions in this module (dynamics, technique state), this
+    operates on the Score directly rather than per-Part.
+
+    A MetronomeMark's `.number` (the visible/notated metronome number,
+    e.g. an explicit "quarter = 96" marking) is preferred when present;
+    `.numberSounding` (the PLAYBACK-only tempo, e.g. from a <sound
+    tempo="71"/> attribute attached to a tempo WORD like "Adagio" with
+    no explicit metronome number) is used otherwise. Verified this
+    distinction directly against real files - relying on `.number`
+    alone silently missed real tempo data on files that only have a
+    tempo word, not an explicit metronome marking.
+
+    If no tempo marking is found anywhere in the score, a single
+    (0, DEFAULT_TEMPO_BPM) event is returned - the exported file is
+    always explicit about its tempo rather than depending on
+    whatever implicit default a given MIDI reader happens to assume.
+    """
+    events_by_offset = {}
+
+    for part in score.parts:
+        for el in part.flatten():
+            if el.__class__.__name__ != "MetronomeMark":
+                continue
+
+            bpm = el.number if el.number is not None else el.numberSounding
+            if bpm is None:
+                continue
+
+            # First one found at a given offset wins - later
+            # duplicates (the same tempo re-declared on another staff,
+            # or via both a <metronome> element and a <sound tempo>
+            # attribute at once, both confirmed to happen in real
+            # files) are silently skipped rather than creating
+            # redundant/conflicting tempo events at the same tick.
+            if el.offset not in events_by_offset:
+                events_by_offset[el.offset] = bpm
+
+    if not events_by_offset:
+        return [(0, DEFAULT_TEMPO_BPM)]
+
+    return sorted(events_by_offset.items())
+
+
 def resolve_artificial_harmonics(part):
     """Find chords representing artificial harmonics (a diamond-notehead
     touch pitch + a normal-notehead stopped pitch - the standard string

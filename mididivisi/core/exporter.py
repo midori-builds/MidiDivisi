@@ -12,7 +12,7 @@ import os
 import re
 
 from music21 import instrument as m21_instrument
-from music21 import note, stream
+from music21 import note, stream, tempo
 
 from mididivisi.core.parser import get_part_articulation_groups
 
@@ -115,6 +115,21 @@ def _sanitize_filename(name):
     return safe or "unnamed_instrument"
 
 
+def _insert_tempo_events(out_score, tempo_events):
+    """Insert (offset, bpm) tempo events directly onto the output
+    Score object (not into any Part) - verified this makes music21
+    write them into their own separate conductor track, leaving every
+    actual data track untouched. Without this, exported MIDI had NO
+    tempo information at all, meaning any DAW reading it back would
+    silently assume its own default tempo (commonly 120 BPM)
+    regardless of the real piece's actual tempo - a real, guaranteed-
+    to-matter correctness gap, not an edge case (every real test file
+    used in development had an actual tempo other than 120).
+    """
+    for offset, bpm in tempo_events:
+        out_score.insert(offset, tempo.MetronomeMark(number=bpm))
+
+
 def export_score_to_midi_per_instrument(score, output_dir):
     """Same grouping as export_score_to_midi, but writes ONE MIDI file
     per instrument/part into output_dir, instead of combining
@@ -160,25 +175,32 @@ def export_score_to_midi_per_instrument(score, output_dir):
 
 
 def _flatten_instrument_with_keyswitches(instr):
-    """Combine an instrument's INCLUDED groups into ONE time-ordered
-    list of notes, with a keyswitch note-on inserted whenever the
-    active articulation bucket changes from one note to the next.
+    """Combine an instrument's INCLUDED, MATCHED groups (those with a
+    real profile_item) into ONE time-ordered list of notes, with a
+    keyswitch note-on inserted whenever the active articulation bucket
+    changes from one note to the next.
 
-    Groups with no profile_item (unmatched tracks, or tracks that
-    predate the assigned profile) are included in the flattened
-    output but never trigger a keyswitch insertion - there's no
-    bucket for them to switch to.
+    Groups with no profile_item (an articulation the assigned profile
+    doesn't define a keyword for) are DELIBERATELY EXCLUDED here, not
+    included-but-unswitched - see _build_instrument_export_tracks,
+    which exports them as their own separate track(s) instead. Folding
+    them into this flattened track with no keyswitch cue would be a
+    real correctness problem, not just a cosmetic one: the sampler
+    would keep playing on whatever patch the PREVIOUS keyswitch last
+    selected, which is very likely wrong for the unmatched passage.
 
     KNOWN LIMITATION, accepted rather than solved (see BACKLOG.md):
-    if two different groups have notes at the exact same offset (a
-    genuinely simultaneous multi-articulation moment), the inserted
-    keyswitch note-on could collide with real notes from the other
-    group at that same instant. Not addressed here.
+    if two different MATCHED groups have notes at the exact same
+    offset (a genuinely simultaneous multi-articulation moment), the
+    inserted keyswitch note-on could collide with real notes from the
+    other group at that same instant. Not addressed here.
     """
     timeline = []
     for group in instr.groups:
         if not group.included:
             continue
+        if group.profile_item is None:
+            continue  # exported as its own separate track instead - see above
         for n in group.get_combined_notes():
             timeline.append((n.offset, group, n))
 
@@ -191,7 +213,7 @@ def _flatten_instrument_with_keyswitches(instr):
         if group.id != current_group_id:
             current_group_id = group.id
             item = group.profile_item
-            if item is not None and item.keyswitch_note is not None:
+            if item.keyswitch_note is not None:
                 ks_note = note.Note(midi=item.keyswitch_note, quarterLength=KEYSWITCH_NOTE_DURATION)
                 ks_note.offset = offset
                 ks_note.volume.velocity = KEYSWITCH_NOTE_VELOCITY
@@ -209,6 +231,14 @@ def _build_instrument_export_tracks(instr):
     export_session_to_midi_per_instrument so this decision only lives
     in one place. Returns a list of (track_name, notes) tuples, notes
     already filtered to non-empty.
+
+    When keyswitching is active, MATCHED groups (profile_item is not
+    None) combine into one flattened track - but UNMATCHED groups
+    (an articulation the profile has no keyword for) still export as
+    their own separate track(s), same as if keyswitching were off
+    just for them. See _flatten_instrument_with_keyswitches for why
+    folding them in silently would be actively wrong, not just
+    unhelpful.
     """
     keyswitching_active = (
         instr.keyswitch_enabled
@@ -216,12 +246,24 @@ def _build_instrument_export_tracks(instr):
         and instr.profile.keyswitch_enabled
     )
 
-    if keyswitching_active:
-        notes = _flatten_instrument_with_keyswitches(instr)
-        return [(instr.name, notes)] if notes else []
+    if not keyswitching_active:
+        tracks = [(g.name, g.get_combined_notes()) for g in instr.groups if g.included]
+        return [(name, notes) for name, notes in tracks if notes]
 
-    tracks = [(g.name, g.get_combined_notes()) for g in instr.groups if g.included]
-    return [(name, notes) for name, notes in tracks if notes]
+    result = []
+
+    flattened_notes = _flatten_instrument_with_keyswitches(instr)
+    if flattened_notes:
+        result.append((instr.name, flattened_notes))
+
+    for group in instr.groups:
+        if not group.included or group.profile_item is not None:
+            continue
+        notes = group.get_combined_notes()
+        if notes:
+            result.append((group.name, notes))
+
+    return result
 
 
 def export_session_to_midi(session, output_path):
@@ -238,6 +280,7 @@ def export_session_to_midi(session, output_path):
     empty track.
     """
     out_score = stream.Score()
+    _insert_tempo_events(out_score, session.tempo_events)
 
     for instr in session.instruments:
         if not instr.included:
@@ -286,6 +329,7 @@ def export_session_to_midi_per_instrument(session, output_dir):
         output_path = os.path.join(output_dir, f"{filename}.mid")
 
         out_score = stream.Score()
+        _insert_tempo_events(out_score, session.tempo_events)
         for track_name, notes in tracks_with_notes:
             out_score.insert(0, _build_midi_track(track_name, notes))
         out_score.write("midi", fp=output_path)

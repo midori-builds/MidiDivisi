@@ -14,7 +14,7 @@ Keyword Matching (for whichever inventory item is currently
 selected), and a Keyswitch editor (also for the selected item).
 """
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QSize
 from PyQt6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -82,6 +82,14 @@ PRESET_LABELS = [
 ]
 
 TREE_ROLE = Qt.ItemDataRole.UserRole
+
+# Explicit row height so double-click-to-rename's inline text editor
+# has enough vertical room - Qt's default row height was too short,
+# cutting off the top/bottom of the edit field's text. Width must be
+# non-negative (0 works) - QSize(-1, height) is silently discarded by
+# PyQt6 rather than treated as "auto width" (verified directly
+# elsewhere in this project - see main_window.py's matching comment).
+ROW_HEIGHT = 30
 
 
 class ProfileManagerWindow(QMainWindow):
@@ -161,9 +169,10 @@ class ProfileManagerWindow(QMainWindow):
         left_layout.addLayout(export_import_row)
 
         export_import_row2 = QHBoxLayout()
-        export_profile_button = QPushButton("Export Profile...")
-        export_profile_button.clicked.connect(self.export_selected_profile)
-        export_import_row2.addWidget(export_profile_button)
+        self.export_profile_button = QPushButton("Export Profile...")
+        self.export_profile_button.clicked.connect(self.export_selected_profile)
+        self.export_profile_button.setEnabled(False)  # matches _set_editor_enabled's initial state
+        export_import_row2.addWidget(self.export_profile_button)
 
         import_profile_button = QPushButton("Import Profile...")
         import_profile_button.clicked.connect(self.import_profile_file)
@@ -193,15 +202,16 @@ class ProfileManagerWindow(QMainWindow):
 
         self.inventory_list = QListWidget()
         self.inventory_list.itemSelectionChanged.connect(self.on_inventory_selection_changed)
+        self.inventory_list.itemChanged.connect(self.on_inventory_item_renamed)
         inventory_panel.addWidget(self.inventory_list)
 
         inventory_button_row = QHBoxLayout()
-        add_inventory_button = QPushButton("Add")
-        add_inventory_button.clicked.connect(self.add_inventory_item)
-        inventory_button_row.addWidget(add_inventory_button)
-        remove_inventory_button = QPushButton("Remove")
-        remove_inventory_button.clicked.connect(self.remove_inventory_item)
-        inventory_button_row.addWidget(remove_inventory_button)
+        self.add_inventory_button = QPushButton("Add")
+        self.add_inventory_button.clicked.connect(self.add_inventory_item)
+        inventory_button_row.addWidget(self.add_inventory_button)
+        self.remove_inventory_button = QPushButton("Remove")
+        self.remove_inventory_button.clicked.connect(self.remove_inventory_item)
+        inventory_button_row.addWidget(self.remove_inventory_button)
         inventory_panel.addLayout(inventory_button_row)
 
         panels_row.addLayout(inventory_panel)
@@ -219,15 +229,15 @@ class ProfileManagerWindow(QMainWindow):
         matching_panel.addWidget(self.matching_combo)
 
         matching_button_row = QHBoxLayout()
-        add_match_button = QPushButton("Add")
-        add_match_button.clicked.connect(self.add_matched_label)
-        matching_button_row.addWidget(add_match_button)
-        remove_match_button = QPushButton("Remove")
-        remove_match_button.clicked.connect(self.remove_matched_label)
-        matching_button_row.addWidget(remove_match_button)
-        auto_add_button = QPushButton("Auto-Add")
-        auto_add_button.clicked.connect(self.auto_add_matches)
-        matching_button_row.addWidget(auto_add_button)
+        self.add_match_button = QPushButton("Add")
+        self.add_match_button.clicked.connect(self.add_matched_label)
+        matching_button_row.addWidget(self.add_match_button)
+        self.remove_match_button = QPushButton("Remove")
+        self.remove_match_button.clicked.connect(self.remove_matched_label)
+        matching_button_row.addWidget(self.remove_match_button)
+        self.auto_add_button = QPushButton("Auto-Add")
+        self.auto_add_button.clicked.connect(self.auto_add_matches)
+        matching_button_row.addWidget(self.auto_add_button)
         matching_panel.addLayout(matching_button_row)
 
         panels_row.addLayout(matching_panel)
@@ -275,9 +285,15 @@ class ProfileManagerWindow(QMainWindow):
 
     def _set_editor_enabled(self, enabled):
         self.inventory_list.setEnabled(enabled)
+        self.add_inventory_button.setEnabled(enabled)
+        self.remove_inventory_button.setEnabled(enabled)
         self.matching_list.setEnabled(enabled)
         self.matching_combo.setEnabled(enabled)
+        self.add_match_button.setEnabled(enabled)
+        self.remove_match_button.setEnabled(enabled)
+        self.auto_add_button.setEnabled(enabled)
         self.profile_keyswitch_checkbox.setEnabled(enabled)
+        self.export_profile_button.setEnabled(enabled)
         if not enabled:
             self.keyswitch_note_row.setVisible(False)
 
@@ -301,6 +317,7 @@ class ProfileManagerWindow(QMainWindow):
             collection_item.setText(0, collection.name)
             collection_item.setFlags(collection_item.flags() | Qt.ItemFlag.ItemIsEditable)
             collection_item.setData(0, TREE_ROLE, ("collection", collection))
+            collection_item.setSizeHint(0, QSize(0, ROW_HEIGHT))
             if select_id == collection.id:
                 item_to_select = collection_item
 
@@ -309,6 +326,7 @@ class ProfileManagerWindow(QMainWindow):
                 profile_item.setText(0, profile.name)
                 profile_item.setFlags(profile_item.flags() | Qt.ItemFlag.ItemIsEditable)
                 profile_item.setData(0, TREE_ROLE, ("profile", profile))
+                profile_item.setSizeHint(0, QSize(0, ROW_HEIGHT))
                 if select_id == profile.id:
                     item_to_select = profile_item
 
@@ -324,6 +342,7 @@ class ProfileManagerWindow(QMainWindow):
         if self.current_profile:
             for item in self.current_profile.inventory:
                 list_item = QListWidgetItem(item.name)
+                list_item.setFlags(list_item.flags() | Qt.ItemFlag.ItemIsEditable)
                 list_item.setData(TREE_ROLE, item)
                 self.inventory_list.addItem(list_item)
         self.inventory_list.blockSignals(False)
@@ -495,6 +514,14 @@ class ProfileManagerWindow(QMainWindow):
         self._refresh_matching_list()
         self._refresh_keyswitch_editor()
 
+    def on_inventory_item_renamed(self, list_item):
+        item = list_item.data(TREE_ROLE)
+        new_text = list_item.text().strip()
+        if item is None or not new_text or new_text == item.name:
+            return
+        item.name = new_text
+        self._save()
+
     # --- Keyword matching ---------------------------------------------------
 
     def add_matched_label(self):
@@ -504,11 +531,34 @@ class ProfileManagerWindow(QMainWindow):
         if not label:
             return
 
-        # Enforce uniqueness: a label maps to at most one inventory
-        # item within a profile - remove it from wherever it
-        # currently is (if anywhere) before adding it here, rather
-        # than letting apply_profile's label->item lookup silently
-        # resolve conflicts by last-write-wins.
+        # A label maps to at most one inventory item within a
+        # profile. If it's already claimed by a DIFFERENT item, warn
+        # and let the user cancel, rather than silently moving it -
+        # this was a real, confirmed point of confusion (a keyword
+        # would just vanish from its previous bucket with no
+        # indication anything happened). Not warning if the label is
+        # already on THIS SAME item - re-adding it there is a no-op,
+        # nothing to confirm.
+        conflicting_item = next(
+            (
+                other for other in self.current_profile.inventory
+                if other.id != self.current_item.id and label in other.matched_labels
+            ),
+            None,
+        )
+        if conflicting_item is not None:
+            confirmed = QMessageBox.question(
+                self,
+                "Keyword already in use",
+                f'"{label}" is already matched to "{conflicting_item.name}".\n\n'
+                f'Moving it to "{self.current_item.name}" will remove it from '
+                f'"{conflicting_item.name}". Continue?',
+                QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if confirmed != QMessageBox.StandardButton.Yes:
+                return
+
         for other_item in self.current_profile.inventory:
             if label in other_item.matched_labels:
                 other_item.matched_labels.remove(label)
