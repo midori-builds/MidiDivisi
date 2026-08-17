@@ -56,6 +56,10 @@ KEYWORD_CATEGORY_LABELS = {
     "sul_tasto_off": "Sul tasto / flautando (end)",
     "col_legno_on": "Col legno (start)",
     "col_legno_off": "Col legno (end)",
+    "solo_on": "Solo (start)",
+    "solo_off": "Solo end (tutti/a2)",
+    "divisi_on": "Divisi (start)",
+    "divisi_off": "Divisi end (unis.)",
 }
 
 # Cancel-words for sul ponticello/sul tasto/col legno deliberately
@@ -78,6 +82,10 @@ DEFAULT_KEYWORD_MAPPING = {
     "sul_tasto_off": ["ord", "naturale", "nat", "pos nat"],
     "col_legno_on": ["col legno", "col legno battuto", "col legno tratto"],
     "col_legno_off": ["arco", "ord", "naturale", "nat"],
+    "solo_on": ["solo"],
+    "solo_off": ["tutti", "a2", "a3", "a4", "unis", "unison"],
+    "divisi_on": ["div", "divisi"],
+    "divisi_off": ["unis", "unison", "a2"],
 }
 
 # Human-readable label + display order for dynamics markings. Order

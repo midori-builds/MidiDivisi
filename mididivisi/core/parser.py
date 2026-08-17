@@ -7,6 +7,8 @@ like pizzicato and mute that are encoded as free-text directions
 rather than per-note marks.
 """
 
+import copy
+
 from music21 import converter, interval, key
 
 from mididivisi.core.settings import settings
@@ -87,6 +89,7 @@ def load_score(file_path):
 
     for part in score.parts:
         resolve_artificial_harmonics(part)
+        resolve_divisi(part)
         apply_dynamics_to_part(part)
 
     return score
@@ -353,11 +356,250 @@ def get_technique_timeline(part):
     return events
 
 
+def get_divisi_timeline(part):
+    """Scan a part's TextExpressions for divisi_on/divisi_off markers
+    and return a list of (offset, is_active) events, sorted by
+    offset. Kept SEPARATE from get_technique_timeline/
+    STATE_KEYWORD_CATEGORIES on purpose - divisi doesn't just add a
+    descriptor to existing notes the way pizzicato/mute do, it SPLITS
+    them into new derived note-sets (see resolve_divisi), which needs
+    fundamentally different downstream handling than simple label
+    concatenation.
+    """
+    return _get_on_off_timeline(part, "divisi_on", "divisi_off")
+
+
+def get_solo_timeline(part):
+    """Scan a part's TextExpressions for solo_on/solo_off markers and
+    return a list of (offset, is_active) events. Kept SEPARATE from
+    STATE_KEYWORD_CATEGORIES for the same reason as divisi - solo
+    isn't "another technique to combine with others" the way
+    pizzicato/mute are, it's an orchestration-level ROUTING decision
+    (which physical player(s) are playing), the same category as
+    divisi, not a label to concatenate onto whatever else a note is
+    doing. See get_part_articulation_groups for how this actually
+    routes notes to a separate Instrument.
+    """
+    return _get_on_off_timeline(part, "solo_on", "solo_off")
+
+
+def _get_on_off_timeline(part, on_key, off_key):
+    on_words = settings.get_keyword_set(on_key)
+    off_words = settings.get_keyword_set(off_key)
+
+    events = []
+    for el in part.flatten():
+        if el.__class__.__name__ != "TextExpression":
+            continue
+        text = (el.content or "").strip().lower().rstrip(".")
+        if text in on_words:
+            events.append((el.offset, True))
+        elif text in off_words:
+            events.append((el.offset, False))
+
+    events.sort(key=lambda ev: ev[0])
+    return events
+
+
+def _is_active_at(timeline, offset):
+    active = False
+    for ev_offset, ev_active in timeline:
+        if ev_offset > offset:
+            break
+        active = ev_active
+    return active
+
+
+def resolve_divisi(part):
+    """Detect and split 2-way string-style divisi passages, tagging
+    each affected note/chord with a `.mididivisi_divisi_role`
+    attribute of "Top", "Bottom", or "Both", for
+    get_part_articulation_groups to route into separate tracks.
+
+    Only acts within an explicit divisi_on/divisi_off text window (see
+    get_divisi_timeline) - deliberate: a 2-note Chord in a string part
+    is structurally IDENTICAL whether it's a genuine divisi passage or
+    a double-stop (one player, two strings on their own instrument) -
+    the only way to tell them apart is the explicit text marker, so
+    requiring it avoids silently misreading a double-stop as a section
+    split.
+
+    Two source conventions, both gated by the same text-marker window
+    but needing different splitting logic, since they're genuinely
+    different music21 data shapes (verified directly against real
+    parsed output, not assumed):
+      - CHORD-based (div. + a 2-note chord in one voice): one Chord
+        object, split by pitch height. The ORIGINAL chord is deep-
+        copied first (preserving articulations/expressions on BOTH
+        halves), then each copy is mutated down to one pitch and
+        tagged Top/Bottom, with the bottom copy inserted at the same
+        offset via the original's activeSite - building the bottom
+        note from scratch instead was tried first and found (by
+        testing a Staccato-marked divisi chord specifically) to
+        silently lose the original's articulations on that side only.
+      - VOICE-based (two real, independent Voice streams - can have
+        completely different rhythms, not just different pitches at
+        matching beats): requires comparing two independent timelines,
+        not splitting one object. Voice offsets are MEASURE-relative,
+        not part-absolute (verified directly - this would have been a
+        silent, hard-to-catch bug otherwise) - absolute offset is
+        reconstructed as measure.offset + note.offset. Flattening the
+        whole part is deliberately NOT used to recover voice identity
+        here, since a flattened note's nearest-Voice context is
+        unreliable after flattening (verified directly - it returned
+        the SAME wrong voice id for every note in a test case).
+        Convention: lower voice number = top/stems-up, higher = bottom
+        /stems-down (standard engraving practice - an assumption, not
+        independently verifiable per note).
+    In both cases, an exact (offset, pitch(es), duration) match between
+    what would otherwise be Top and Bottom is a unison moment - tagged
+    "Both" instead, meaning the note belongs in BOTH resulting tracks
+    (get_part_articulation_groups duplicates it), since physically
+    both players would be playing it together.
+
+    Scoped to 2-way divisi only, matching real string-writing practice
+    - NOT a general N-way splitter and not intended to cover wind/
+    brass "a3"/"a4" exploding, which is a different problem (see
+    BACKLOG.md's Auto Divisi/Solo section for the reasoning). Anything
+    outside 2-way (e.g. an incidental 3+ note chord encountered during
+    an active divisi window) is deliberately left untouched rather
+    than guessed at.
+    """
+    timeline = get_divisi_timeline(part)
+    if not timeline:
+        return  # no divisi markers in this part - nothing to do
+
+    processed_ids = set()
+
+    # --- Pass 1: VOICE-based divisi (measure-level) ---
+    for measure in part.getElementsByClass("Measure"):
+        voices = list(measure.voices)
+        if len(voices) != 2:
+            continue  # only the 2-voice case is in scope
+
+        measure_offset = measure.offset
+        if not _is_active_at(timeline, measure_offset):
+            continue
+
+        v1, v2 = voices[0], voices[1]
+        try:
+            v1_id, v2_id = int(v1.id), int(v2.id)
+        except (TypeError, ValueError):
+            v1_id, v2_id = 1, 2  # fallback if voice ids aren't cleanly numeric
+        top_voice, bottom_voice = (v1, v2) if v1_id < v2_id else (v2, v1)
+
+        top_notes = [n for n in top_voice.notes if n.isNote or n.isChord]
+        bottom_notes = [n for n in bottom_voice.notes if n.isNote or n.isChord]
+
+        def _note_key(n):
+            pitches = tuple(sorted(p.midi for p in n.pitches)) if n.isChord else (n.pitch.midi,)
+            return (measure_offset + n.offset, pitches, n.duration.quarterLength)
+
+        bottom_by_key = {_note_key(n): n for n in bottom_notes}
+        matched_keys = set()
+
+        for n in top_notes:
+            key = _note_key(n)
+            if key in bottom_by_key:
+                # Only the TOP note gets tagged "Both" -
+                # get_part_articulation_groups duplicates every "Both"
+                # -tagged note into both Top and Bottom groups on its
+                # own. Tagging BOTH the top and bottom objects here
+                # (tried first) meant each independently triggered
+                # that duplication, producing FOUR entries for one
+                # genuine unison event instead of two - caught by
+                # testing a real two-measure voice-based divisi
+                # passage, not visible from a single-measure test.
+                # The bottom note's musical content is now fully
+                # represented by the top note's tag, so it's removed
+                # from the stream entirely rather than also tagged.
+                n.mididivisi_divisi_role = "Both"
+                matching_bottom = bottom_by_key[key]
+                bottom_site = matching_bottom.activeSite
+                if bottom_site is not None:
+                    bottom_site.remove(matching_bottom)
+                matched_keys.add(key)
+            else:
+                n.mididivisi_divisi_role = "Top"
+            processed_ids.add(id(n))
+
+        for n in bottom_notes:
+            key = _note_key(n)
+            if key not in matched_keys:
+                n.mididivisi_divisi_role = "Bottom"
+            processed_ids.add(id(n))
+
+    # --- Pass 2: CHORD-based divisi (note-level) ---
+    # Anything already handled by the voice pass above is skipped, so
+    # a measure that used real voices doesn't get double-processed
+    # here.
+    for n in list(part.flatten().notes):
+        if id(n) in processed_ids:
+            continue
+        if not (n.isNote or n.isChord):
+            continue
+        if not _is_active_at(timeline, n.offset):
+            continue
+
+        if n.isNote:
+            # A single pitch during an active divisi window - both
+            # players are playing this note together.
+            n.mididivisi_divisi_role = "Both"
+        elif n.isChord and len(n.pitches) == 2:
+            top_pitch = max(n.pitches, key=lambda p: p.midi)
+            bottom_pitch = min(n.pitches, key=lambda p: p.midi)
+
+            if top_pitch.midi == bottom_pitch.midi:
+                # A "chord" whose two notated pitches are actually the
+                # same pitch - already a unison, not a real split.
+                n.pitches = [top_pitch]
+                n.mididivisi_divisi_role = "Both"
+                continue
+
+            site = n.activeSite
+            # Deep-copy the WHOLE original chord before mutating
+            # either half - this is what preserves articulations/
+            # expressions/etc. on BOTH resulting notes symmetrically.
+            # Building the bottom note from scratch (note.Note(...))
+            # was tried first and found to silently lose the original
+            # chord's articulations on that side only, since a fresh
+            # Note object starts with an empty articulations list -
+            # caught by testing a Staccato-marked divisi chord
+            # specifically, not found by inspection alone.
+            bottom_chord = copy.deepcopy(n)
+            bottom_chord.pitches = [bottom_pitch]
+            bottom_chord.mididivisi_divisi_role = "Bottom"
+
+            n.pitches = [top_pitch]
+            n.mididivisi_divisi_role = "Top"
+
+            if site is not None:
+                site.insert(n.offset, bottom_chord)
+        # else: 1 or 3+ pitches - out of scope, left untouched (no tag)
+
+
 def get_part_articulation_groups(part):
     """Walk a part's notes/chords in order, tracking passage-level
     technique state (see STATE_KEYWORD_CATEGORIES) alongside each
     note's own per-note marks, and return a dict of
-    {combined_label: [note_or_chord, ...]}.
+    {(routing, combined_label): [note_or_chord, ...]}.
+
+    `routing` is None (normal/tutti), "DivisiTop", "DivisiBottom", or
+    "Solo" - a SEPARATE dimension from the articulation label, on
+    purpose: routing answers "which physical player(s) are playing
+    this," while the label answers "what technique are they using" -
+    two genuinely different questions that used to be conflated into
+    one combined string (e.g. "DivisiTop+Staccato"), which turned out
+    to be a real problem (see Session.from_score() / BACKLOG.md's
+    Divisi section for why - keyword-matching a Profile against that
+    combined string meant divisi/solo passages could accidentally get
+    swept into keyswitch-flattening if a user ever typed the exact
+    combined label). Session.from_score() uses `routing` to build
+    genuinely SEPARATE Instruments, not just separate Groups.
+
+    Divisi routing (from resolve_divisi's per-note tagging) takes
+    priority over solo (mutually exclusive in real orchestration
+    anyway - divisi implies multiple players, solo implies one).
 
     Keeping the actual Note/Chord objects (not just a count) is what
     lets this feed MIDI export later - we need real pitch/offset/
@@ -367,6 +609,8 @@ def get_part_articulation_groups(part):
     event_index = 0
     state = {key: False for key in STATE_KEYWORD_CATEGORIES}
     groups = {}
+
+    solo_timeline = get_solo_timeline(part)
 
     for n in part.flatten().notes:
         # Include both single Notes and Chords (double/multi-stops) -
@@ -402,22 +646,45 @@ def get_part_articulation_groups(part):
             if all(p in ("Accent", "StrongAccent") for p in note_label_parts):
                 note_label = "+".join(["Sustain"] + note_label_parts)
 
-        if note_label:
-            label = "+".join(state_labels + [note_label])
-        elif state_labels:
-            label = "+".join(state_labels)
-        else:
-            label = "Sustain"
+        base_label_parts = state_labels + ([note_label] if note_label else [])
+        base_label = "+".join(base_label_parts) if base_label_parts else "Sustain"
 
-        groups.setdefault(label, []).append(n)
+        # Divisi routing - see resolve_divisi for how notes get tagged
+        # with .mididivisi_divisi_role. "Both" (a unison moment within
+        # an active divisi passage) goes into BOTH resulting
+        # instruments, duplicated via deepcopy rather than sharing one
+        # object reference across two independently-owned note lists.
+        divisi_role = getattr(n, "mididivisi_divisi_role", None)
+
+        if divisi_role == "Both":
+            groups.setdefault(("DivisiTop", base_label), []).append(n)
+            # deepcopy does NOT reliably preserve absolute offset for a
+            # note nested in Voice/Measure structure - verified
+            # directly (a real note at offset 2.0 came back as 0.0
+            # after copying). Explicitly re-set from the original
+            # rather than trust the copy - same safe pattern already
+            # used elsewhere (exporter.py's _build_midi_track reads
+            # n.offset from the ORIGINAL note at insert time, not from
+            # whatever a copy's own .offset attribute reports).
+            duplicate = copy.deepcopy(n)
+            duplicate.offset = n.offset
+            groups.setdefault(("DivisiBottom", base_label), []).append(duplicate)
+        elif divisi_role == "Top":
+            groups.setdefault(("DivisiTop", base_label), []).append(n)
+        elif divisi_role == "Bottom":
+            groups.setdefault(("DivisiBottom", base_label), []).append(n)
+        elif _is_active_at(solo_timeline, n.offset):
+            groups.setdefault(("Solo", base_label), []).append(n)
+        else:
+            groups.setdefault((None, base_label), []).append(n)
 
     return groups
 
 
 def get_part_articulation_counts(part):
     """Same grouping as get_part_articulation_groups, but returns just
-    {label: count} - kept for the console-output view, which only
-    needs counts, not the underlying note objects.
+    {(routing, label): count} - kept for the console-output view,
+    which only needs counts, not the underlying note objects.
     """
     groups = get_part_articulation_groups(part)
-    return {label: len(notes) for label, notes in groups.items()}
+    return {key: len(notes) for key, notes in groups.items()}

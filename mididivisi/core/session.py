@@ -77,33 +77,58 @@ class Track:
 
 
 class InstrumentIdentity:
-    """Permanent identity for one ORIGINAL part in the score. Exactly
-    one is created per part when the score is first loaded - so two
-    parts that happen to share a display name (e.g. a grand-staff
-    instrument like Harp, split into two music21 Parts) get two
-    distinct identities, never conflated. `name` is mutable and
-    persists across merge/split, same guarantee as Track.name.
+    """Permanent identity for one ORIGINAL part in the score, OR a
+    synthesized Divisi/Solo variant DERIVED from one (see `variant`
+    below). Exactly one "real" (variant=None) identity is created per
+    part when the score is first loaded - so two parts that happen to
+    share a display name (e.g. a grand-staff instrument like Harp,
+    split into two music21 Parts) get two distinct identities, never
+    conflated. `name` is mutable and persists across merge/split, same
+    guarantee as Track.name.
     """
 
-    def __init__(self, original_name, occurrence_index=0):
+    VARIANT_DISPLAY_SUFFIXES = {
+        "DivisiTop": "Divisi Top",
+        "DivisiBottom": "Divisi Bottom",
+        "Solo": "Solo",
+    }
+
+    def __init__(self, original_name, occurrence_index=0, variant=None):
         self.id = str(uuid.uuid4())
-        self.original_name = original_name  # immutable provenance
-        self.name = original_name  # mutable, user-editable, persists
+        self.original_name = original_name  # immutable provenance - the TRUE base part name,
+                                             # never includes a variant suffix
+        # `variant` is None for a normal identity tied to a real
+        # <part> in the source file. "DivisiTop"/"DivisiBottom"/"Solo"
+        # mark a SYNTHESIZED identity, derived from routing decisions
+        # made in parser.get_part_articulation_groups (see
+        # Session.from_score) - these don't correspond to any separate
+        # <part> in the original MusicXML, which matters for
+        # notation_preview.py's extraction (falls back to the base
+        # part, since there's nothing separate to show).
+        self.variant = variant
+        if variant:
+            self.name = f"{original_name} ({self.VARIANT_DISPLAY_SUFFIXES[variant]})"
+        else:
+            self.name = original_name  # mutable, user-editable, persists
         # Which occurrence this is among parts sharing the same
         # original_name (e.g. the two "Harp" parts from a grand staff
         # get occurrence_index 0 and 1) - needed because original_name
-        # ALONE isn't unique, but (original_name, occurrence_index)
-        # is, and is stable across re-parsing the same file in the
-        # same order. See natural_key.
+        # ALONE isn't unique, but (original_name, occurrence_index) -
+        # plus variant, for a synthesized identity - is, and is stable
+        # across re-parsing the same file in the same order. See
+        # natural_key.
         self.occurrence_index = occurrence_index
 
     @property
     def natural_key(self):
         """A stable identity that survives re-parsing the SAME
         MusicXML file, unlike .id (a fresh random UUID every parse).
-        Used for session save/load.
+        Used for session save/load. Always a 3-tuple (variant is None
+        for a normal identity, not omitted) - a consistent shape is
+        simpler for downstream code than a key whose LENGTH varies by
+        case.
         """
-        return (self.original_name, self.occurrence_index)
+        return (self.original_name, self.occurrence_index, self.variant)
 
     def __repr__(self):
         return f"InstrumentIdentity(name={self.name!r})"
@@ -240,10 +265,31 @@ class Session:
 
     @classmethod
     def from_score(cls, score):
-        """Build a fresh Session from a just-loaded music21 score: one
-        InstrumentIdentity and one single-identity Instrument per
-        part, one Track (and one single-member Group) per
-        (instrument, articulation) combination the parser detects.
+        """Build a fresh Session from a just-loaded music21 score.
+
+        For each part, get_part_articulation_groups returns
+        {(routing, label): notes} - routing is None (normal/tutti),
+        "DivisiTop", "DivisiBottom", or "Solo" (see that function's
+        docstring for why routing is kept separate from the
+        articulation label). Groups are bucketed by routing FIRST,
+        each non-empty bucket becoming its own genuinely SEPARATE
+        Instrument (with a synthesized InstrumentIdentity for the
+        Divisi/Solo cases) rather than just a separate Group under one
+        shared instrument.
+
+        This is deliberate, not just tidier organization: a Divisi or
+        Solo passage very likely needs a DIFFERENT sample-library
+        patch than the full section, and keeping them as genuinely
+        separate Instruments means Profile assignment, the KS toggle,
+        and keyswitch flattening all naturally stay scoped correctly -
+        flattening only ever operates within one instrument's groups,
+        so a divisi/solo passage can never accidentally get swept into
+        the main section's flattened keyswitch track just because a
+        Profile's keyword-matching happened to also match its label.
+        (Before this, that combined-label matching was the ONLY thing
+        preventing that outcome, and only by coincidence - see
+        BACKLOG.md's Divisi section.)
+
         Nothing is merged automatically at either level - matches the
         explicit "no auto-merge on load" decision.
         """
@@ -256,20 +302,26 @@ class Session:
             occurrence_index = occurrence_counts.get(part_name, 0)
             occurrence_counts[part_name] = occurrence_index + 1
 
-            identity = InstrumentIdentity(part_name, occurrence_index)
-            session.instrument_identities.append(identity)
-
             articulation_groups = get_part_articulation_groups(part)
-            groups_for_instrument = []
 
-            for label, notes in articulation_groups.items():
-                track = Track(identity, label, notes)
-                session.tracks.append(track)
-                group = Group(track.name, [track])
-                groups_for_instrument.append(group)
+            # Bucket by routing first - each becomes its own Instrument.
+            by_routing = {}
+            for (routing, label), notes in articulation_groups.items():
+                by_routing.setdefault(routing, []).append((label, notes))
 
-            instrument = Instrument(identity.name, [identity], groups_for_instrument)
-            session.instruments.append(instrument)
+            for routing, label_note_pairs in by_routing.items():
+                identity = InstrumentIdentity(part_name, occurrence_index, variant=routing)
+                session.instrument_identities.append(identity)
+
+                groups_for_instrument = []
+                for label, notes in label_note_pairs:
+                    track = Track(identity, label, notes)
+                    session.tracks.append(track)
+                    group = Group(track.name, [track])
+                    groups_for_instrument.append(group)
+
+                instrument = Instrument(identity.name, [identity], groups_for_instrument)
+                session.instruments.append(instrument)
 
         return session
 

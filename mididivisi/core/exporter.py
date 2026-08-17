@@ -68,17 +68,26 @@ def _build_midi_track(track_name, notes):
 
 def _build_instrument_tracks(part, instrument_name):
     """Build one MIDI Part/track per articulation group found in a
-    single music21 Part, named "<instrument> - <label>". Shared by
-    both legacy (score-based) export modes below - a whole-score
-    export just collects every part's tracks into one file, while
-    per-instrument export writes each part's tracks into their own
-    file.
+    single music21 Part, named "<instrument> - <label>" (or
+    "<instrument> (<routing>) - <label>" for a divisi/solo routing).
+    Shared by both legacy (score-based) export modes below - a
+    whole-score export just collects every part's tracks into one
+    file, while per-instrument export writes each part's tracks into
+    their own file.
+
+    NOTE: this legacy path is NOT reachable from the actual app (which
+    always goes through the Session-based export functions further
+    down) - confirmed via a direct search before touching it. Fixed
+    for consistency with get_part_articulation_groups's routing/label
+    key split anyway, rather than leaving known-broken dead code
+    around.
     """
     groups = get_part_articulation_groups(part)
-    return [
-        _build_midi_track(f"{instrument_name} - {label}", notes)
-        for label, notes in groups.items()
-    ]
+    tracks = []
+    for (routing, label), notes in groups.items():
+        name = f"{instrument_name} ({routing}) - {label}" if routing else f"{instrument_name} - {label}"
+        tracks.append(_build_midi_track(name, notes))
+    return tracks
 
 
 def export_score_to_midi(score, output_path):

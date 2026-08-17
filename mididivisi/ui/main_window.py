@@ -49,6 +49,7 @@ from mididivisi.core import session_file
 from mididivisi.ui.export_dialog import ExportDialog
 from mididivisi.ui.settings_dialog import SettingsDialog
 from mididivisi.ui.profile_manager import ProfileManagerWindow
+from mididivisi.ui.notation_preview_window import NotationPreviewWindow
 from mididivisi.ui.profile_picker_dialog import ProfilePickerDialog
 from mididivisi.core.profiles import midi_note_name
 
@@ -57,6 +58,7 @@ COL_NAME = 0
 COL_MERGED = 1
 COL_PROFILE = 2
 COL_KS = 3
+COL_PREVIEW = 4
 
 # Explicit fixed row height - see the matching comment in
 # export_dialog.py for why this is needed (Qt/QSS row-height drift on
@@ -87,6 +89,9 @@ class MainWindow(QMainWindow):
         self.loaded_file_path = None
         self.session_file_path = None
         self.profile_manager_window = None  # created lazily on first open, then reused
+        self.notation_preview_windows = []  # each Preview click opens a NEW independent
+                                             # window (unlike Profile Manager) - held here
+                                             # so they aren't garbage-collected immediately
 
         # Chronological list of currently-checked QTreeWidgetItems -
         # tracked explicitly (not derived by re-scanning the tree)
@@ -211,9 +216,10 @@ class MainWindow(QMainWindow):
 
     def _build_tree(self):
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Track", "Merged", "Profile", "KS"])
-        self.tree.setColumnWidth(COL_NAME, 500)
-        self.tree.setColumnWidth(COL_PROFILE, 200)
+        self.tree.setHeaderLabels(["Track", "Merged", "Profile", "KS", "Preview"])
+        self.tree.setColumnWidth(COL_NAME, 450)
+        self.tree.setColumnWidth(COL_PROFILE, 170)
+        self.tree.setColumnWidth(COL_PREVIEW, 40)
         # Checkboxes are the selection mechanism here, not native row
         # highlighting - disable native selection so the two don't
         # visually compete with each other.
@@ -351,6 +357,27 @@ class MainWindow(QMainWindow):
                 ks_layout.addWidget(ks_checkbox)
                 ks_layout.addStretch(1)
                 self.tree.setItemWidget(instrument_item, COL_KS, ks_wrapper)
+
+            # Notation Preview - crude v1, per instrument. Always
+            # available (doesn't depend on a profile being assigned),
+            # only needs the original score's file path, which is why
+            # this is disabled entirely if the session was somehow
+            # created without one (shouldn't normally happen given how
+            # load/import work, but defensive rather than crashing).
+            # TODO replace with preview icon
+            preview_button = QPushButton("P")
+            preview_button.setFixedHeight(fixed_height)
+            preview_button.clicked.connect(
+                lambda _, i=instrument: self.open_notation_preview(i)
+            )
+            preview_wrapper = QWidget()
+            preview_wrapper.setStyleSheet("background: transparent;")
+            preview_layout = QVBoxLayout(preview_wrapper)
+            preview_layout.setContentsMargins(0, 0, 0, 0)
+            preview_layout.addStretch(1)
+            preview_layout.addWidget(preview_button)
+            preview_layout.addStretch(1)
+            self.tree.setItemWidget(instrument_item, COL_PREVIEW, preview_wrapper)
 
             for group in instrument.groups:
                 group_item = QTreeWidgetItem(instrument_item)
@@ -885,6 +912,31 @@ class MainWindow(QMainWindow):
         """
         if self.session is not None:
             self.refresh_tree()
+
+    def open_notation_preview(self, instrument):
+        """Crude v1 - see notation_preview_window.py. Renders the
+        instrument's real notation, extracted directly from the
+        ORIGINAL score file (not reconstructed from our own flat
+        Track/Group note data).
+
+        For a MERGED instrument (2+ InstrumentIdentity), previews just
+        the FIRST identity (same "first-selected" precedent already
+        used for naming elsewhere) - a real, known limitation of this
+        crude version, not a full multi-part combined view. Flagged
+        clearly rather than silently only showing part of the story.
+        """
+        if self.loaded_file_path is None:
+            QMessageBox.warning(
+                self, "Preview unavailable", "No original score file is available for this session."
+            )
+            return
+
+        identity = instrument.identities[0]
+        window = NotationPreviewWindow(
+            instrument.name, self.loaded_file_path, identity.natural_key, parent=self
+        )
+        window.show()
+        self.notation_preview_windows.append(window)
 
     def open_profile_picker(self, instrument):
         dialog = ProfilePickerDialog(instrument.name, instrument.profile, parent=self)

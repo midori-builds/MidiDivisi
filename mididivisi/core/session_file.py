@@ -7,7 +7,18 @@ A .mididivisi file is a zip containing:
   - session.json           - the session's structure, keyed by natural
                               keys (NOT .id, which is a fresh random
                               UUID every parse - see session.py's
-                              Track.natural_key / InstrumentIdentity.natural_key)
+                              Track.natural_key / InstrumentIdentity.natural_key).
+                              Also stores Profile assignment per
+                              instrument and InventoryItem assignment
+                              per group, keyed by their real .id (a
+                              Profile is a persistent, separately-
+                              editable resource, not something re-
+                              derived by re-parsing - so it's resolved
+                              against the LIVE ProfileLibrary on load,
+                              not embedded/frozen, meaning a reload
+                              reflects the profile's CURRENT state,
+                              same philosophy as natural-key track
+                              resolution).
   - settings_snapshot.json - Settings' state at save time
 
 Packaging the score alongside the session (rather than just storing a
@@ -51,6 +62,7 @@ from datetime import datetime, timezone
 from mididivisi.core.parser import load_score
 from mididivisi.core.session import Session, Instrument, Group
 from mididivisi.core.settings import settings as live_settings
+from mididivisi.core.profiles import library
 
 FORMAT_VERSION = 1
 
@@ -74,6 +86,14 @@ def _serialize_session(session):
                     "name": group.name,
                     "included": group.included,
                     "track_keys": [list(t.natural_key) for t in group.tracks],
+                    # Which InventoryItem (from the instrument's
+                    # assigned Profile, if any) this group corresponds
+                    # to - by id, not embedded data, since Profiles are
+                    # a live, editable resource re-resolved against
+                    # its CURRENT state on load (same philosophy as
+                    # natural-key track resolution), not frozen at
+                    # save time.
+                    "profile_item_id": group.profile_item.id if group.profile_item else None,
                 }
             )
 
@@ -83,6 +103,8 @@ def _serialize_session(session):
                 "included": instrument.included,
                 "identity_keys": [list(ident.natural_key) for ident in instrument.identities],
                 "groups": groups_data,
+                "profile_id": instrument.profile.id if instrument.profile else None,
+                "keyswitch_enabled": instrument.keyswitch_enabled,
             }
         )
 
@@ -209,6 +231,22 @@ def finish_loading_session(load_result, use_saved_settings):
         if not identities:
             continue
 
+        # Resolve the instrument's Profile assignment FIRST (by id,
+        # against the live ProfileLibrary - a Profile is an editable,
+        # reusable resource, so a reload should reflect its CURRENT
+        # state, not a frozen snapshot) - needed before groups are
+        # built below, since each group's profile_item is looked up
+        # within THIS profile's inventory.
+        resolved_profile = None
+        profile_id = instr_data.get("profile_id")
+        if profile_id is not None:
+            _, resolved_profile = library.find_profile(profile_id)
+            if resolved_profile is None:
+                warnings.append(
+                    f"Profile assigned to '{instr_data['name']}' no longer exists "
+                    f"- profile assignment cleared"
+                )
+
         groups = []
         for group_data in instr_data["groups"]:
             tracks = []
@@ -225,6 +263,21 @@ def finish_loading_session(load_result, use_saved_settings):
 
             group = Group(group_data["name"], tracks)
             group.included = group_data["included"]
+
+            profile_item_id = group_data.get("profile_item_id")
+            if profile_item_id is not None and resolved_profile is not None:
+                matching_item = next(
+                    (item for item in resolved_profile.inventory if item.id == profile_item_id),
+                    None,
+                )
+                if matching_item is not None:
+                    group.profile_item = matching_item
+                else:
+                    warnings.append(
+                        f"Articulation bucket for group '{group_data['name']}' no longer "
+                        f"exists in its profile"
+                    )
+
             groups.append(group)
 
         if not groups:
@@ -232,6 +285,9 @@ def finish_loading_session(load_result, use_saved_settings):
 
         instrument = Instrument(instr_data["name"], identities, groups)
         instrument.included = instr_data["included"]
+        instrument.profile = resolved_profile
+        if resolved_profile is not None:
+            instrument.keyswitch_enabled = instr_data.get("keyswitch_enabled", False)
         new_session.instruments.append(instrument)
 
     return new_session, warnings
