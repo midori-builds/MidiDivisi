@@ -50,6 +50,7 @@ from mididivisi.ui.export_dialog import ExportDialog
 from mididivisi.ui.settings_dialog import SettingsDialog
 from mididivisi.ui.profile_manager import ProfileManagerWindow
 from mididivisi.ui.notation_preview_window import NotationPreviewWindow
+from mididivisi.ui.midifi_dialog import MidifiDialog
 from mididivisi.ui.profile_picker_dialog import ProfilePickerDialog
 from mididivisi.core.profiles import midi_note_name
 
@@ -163,6 +164,13 @@ class MainWindow(QMainWindow):
         profile_manager_action.triggered.connect(self.open_profile_manager)
         profiles_menu.addAction(profile_manager_action)  # always enabled - not tied to a loaded score
 
+        midifi_menu = menu_bar.addMenu("Midi-fy")
+
+        self.midifi_dialog_action = QAction("Midi-fy...", self)
+        self.midifi_dialog_action.triggered.connect(self.open_midifi_dialog)
+        self.midifi_dialog_action.setEnabled(False)  # needs a loaded session's file path to rebuild against
+        midifi_menu.addAction(self.midifi_dialog_action)
+
         help_menu = menu_bar.addMenu("Help")
 
         about_action = QAction("About", self)
@@ -187,6 +195,11 @@ class MainWindow(QMainWindow):
         self.merge_accents_action.triggered.connect(self.merge_accents)
         self.merge_accents_action.setEnabled(False)
         toolbar.addAction(self.merge_accents_action)
+
+        self.merge_midifi_action = QAction("Merge Midi-fy", self)
+        self.merge_midifi_action.triggered.connect(self.merge_midifi)
+        self.merge_midifi_action.setEnabled(False)
+        toolbar.addAction(self.merge_midifi_action)
 
         self.rename_action = QAction("Rename", self)
         self.rename_action.triggered.connect(self.rename_selected)
@@ -632,6 +645,8 @@ class MainWindow(QMainWindow):
         self.export_action.setEnabled(True)
         self.auto_merge_action.setEnabled(True)
         self.merge_accents_action.setEnabled(True)
+        self.merge_midifi_action.setEnabled(True)
+        self.midifi_dialog_action.setEnabled(True)
         self.save_session_action.setEnabled(True)
         self.save_session_as_action.setEnabled(True)
         self.close_file_action.setEnabled(True)
@@ -699,6 +714,8 @@ class MainWindow(QMainWindow):
         self.export_action.setEnabled(True)
         self.auto_merge_action.setEnabled(True)
         self.merge_accents_action.setEnabled(True)
+        self.merge_midifi_action.setEnabled(True)
+        self.midifi_dialog_action.setEnabled(True)
         self.save_session_action.setEnabled(True)
         self.save_session_as_action.setEnabled(True)
         self.close_file_action.setEnabled(True)
@@ -855,6 +872,57 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Merge Accents: nothing to merge", 4000)
 
         self.refresh_tree()
+
+    def merge_midifi(self):
+        """Auto-merge any midi-fy-tagged group (e.g. a tremolo note
+        realized into literal repeated notes) into its corresponding
+        base technique, per instrument - same shape as Merge Accents,
+        see Session.merge_midifi_variants.
+        """
+        if self.session is None:
+            return
+
+        merged_count = self.session.merge_midifi_variants()
+
+        if merged_count:
+            self.statusBar().showMessage(
+                f"Merged {merged_count} midi-fied group(s) into their base technique", 5000
+            )
+        else:
+            self.statusBar().showMessage("Merge Midi-fy: nothing to merge", 4000)
+
+        self.refresh_tree()
+
+    def open_midifi_dialog(self):
+        """Opens the Midi-fy tool. Confirming a change there triggers
+        a FULL SESSION REBUILD - re-parses loaded_file_path fresh with
+        the new config and replaces self.session entirely, discarding
+        any manual customization made since the file was loaded (the
+        dialog itself warns about this before confirming - see
+        midifi_dialog.py). Consistent with how this app already
+        handles Profile reapplication: always rebuild clean from
+        source, never incrementally patch.
+        """
+        if self.session is None or self.loaded_file_path is None:
+            return
+
+        dialog = MidifiDialog(self.session.midifi_config, parent=self)
+        result = dialog.exec()
+
+        if result != dialog.DialogCode.Accepted or dialog.result_config is None:
+            return  # cancelled
+
+        new_config = dialog.result_config
+
+        try:
+            score = load_score(self.loaded_file_path, midifi_config=new_config)
+        except Exception as e:
+            QMessageBox.critical(self, "Failed to rebuild session", str(e))
+            return
+
+        self.session = Session.from_score(score, midifi_config=new_config)
+        self.refresh_tree()
+        self.statusBar().showMessage("Session rebuilt with updated Midi-fy settings", 5000)
 
     def rename_selected(self):
         checked_instruments, checked_groups = self.get_checked_items()

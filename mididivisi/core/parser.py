@@ -12,6 +12,7 @@ import copy
 from music21 import converter, interval, key
 
 from mididivisi.core.settings import settings
+from mididivisi.core.midifi import MidifiConfig, resolve_tremolo_midifi, MIDIFI_SOURCE_LABEL_PREFIX
 
 # Free-text technique markings (from MusicXML <words> directions) that
 # represent a STATE change applying to all following notes, rather than
@@ -73,10 +74,16 @@ ARTIFICIAL_HARMONIC_TRANSPOSITIONS = {
 }
 
 
-def load_score(file_path):
+def load_score(file_path, midifi_config=None):
     """Parse a MusicXML file, convert it to sounding (concert) pitch,
-    resolve artificial harmonics to their real sounding pitch, and set
-    each note's velocity based on the score's dynamics markings.
+    resolve artificial harmonics to their real sounding pitch, resolve
+    divisi passages, realize eligible single-note tremolo into
+    discrete notes per midifi_config, and set each note's velocity
+    based on the score's dynamics markings.
+
+    midifi_config defaults to a fresh MidifiConfig() (a true no-op -
+    see that class for why) if not given, so existing callers that
+    don't care about midi-fy keep working unchanged.
 
     Transposing instruments (Clarinet in Bb, Horn in F, etc.) store
     their notes as WRITTEN pitch in MusicXML - without the
@@ -86,10 +93,12 @@ def load_score(file_path):
     """
     score = converter.parse(file_path)
     score = score.toSoundingPitch()
+    config = midifi_config or MidifiConfig()
 
     for part in score.parts:
         resolve_artificial_harmonics(part)
         resolve_divisi(part)
+        resolve_tremolo_midifi(part, config)
         apply_dynamics_to_part(part)
 
     return score
@@ -648,6 +657,21 @@ def get_part_articulation_groups(part):
 
         base_label_parts = state_labels + ([note_label] if note_label else [])
         base_label = "+".join(base_label_parts) if base_label_parts else "Sustain"
+
+        # Midi-fy routing: a note realized from a tremolo (or, later,
+        # other midi-fy sources) gets a distinguishable
+        # "Midifi+<base_label>" label rather than merging silently
+        # into whatever base_label it would otherwise get - this is
+        # what makes Session.merge_midifi_variants possible (auto-
+        # merge into the matching base bucket, e.g. "Spiccato", with
+        # full split-reversibility), same non-destructive pattern
+        # already used for Merge Accents. A generic label PREFIX (not
+        # a separate routing dimension like divisi/solo) is
+        # deliberate here - unlike divisi/solo, midi-fied notes should
+        # end up combined with the REST of the SAME instrument's
+        # matching articulation, not become their own instrument.
+        if getattr(n, "mididivisi_midifi_source", None) is not None:
+            base_label = f"{MIDIFI_SOURCE_LABEL_PREFIX}+{base_label}"
 
         # Divisi routing - see resolve_divisi for how notes get tagged
         # with .mididivisi_divisi_role. "Both" (a unison moment within

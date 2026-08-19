@@ -42,6 +42,7 @@ Groups are currently owned by which Instrument.
 import uuid
 
 from mididivisi.core.parser import get_part_articulation_groups, get_tempo_timeline
+from mididivisi.core.midifi import MidifiConfig, MIDIFI_SOURCE_LABEL_PREFIX
 
 
 class Track:
@@ -255,6 +256,7 @@ class Session:
         self.instrument_identities = []
         self.instruments = []
         self.tempo_events = []  # (offset, bpm) pairs, score-level - see parser.get_tempo_timeline
+        self.midifi_config = MidifiConfig()  # see core/midifi.py - what was used to build this session
 
     @property
     def groups(self):
@@ -264,7 +266,7 @@ class Session:
         return result
 
     @classmethod
-    def from_score(cls, score):
+    def from_score(cls, score, midifi_config=None):
         """Build a fresh Session from a just-loaded music21 score.
 
         For each part, get_part_articulation_groups returns
@@ -295,6 +297,12 @@ class Session:
         """
         session = cls()
         session.tempo_events = get_tempo_timeline(score)
+        # Stores WHATEVER config was actually used to produce the
+        # note data this score already contains (midi-fy realization
+        # already happened during load_score(), before this method
+        # ever runs) - purely for remembering/redisplaying/persisting
+        # it, not for driving any note processing here.
+        session.midifi_config = midifi_config or MidifiConfig()
         occurrence_counts = {}  # original_name -> how many seen so far, for natural_key
 
         for part in score.parts:
@@ -706,6 +714,68 @@ class Session:
 
                 base_group, accent_group = found_pair
                 self.merge_groups([base_group.id, accent_group.id])
+                merges_done += 1
+
+        return merges_done
+
+    def merge_midifi_variants(self):
+        """Auto-merge any single-track group whose raw label carries
+        the midi-fy tag prefix (see core/midifi.py -
+        MIDIFI_SOURCE_LABEL_PREFIX) into the corresponding non-tagged
+        group WITHIN THE SAME INSTRUMENT, if one currently exists
+        (e.g. "Midifi+Spiccato" merges into "Spiccato"; "Midifi+Sustain"
+        merges into "Sustain"). Notes realized by midi-fy (e.g. a
+        tremolo-marked note turned into literal repeated notes) stay
+        separated by default - this is an opt-in action, not automatic
+        - exactly the concrete motivating case: a spiccato passage
+        with an occasional tremolo-marked note should, after this
+        merge, look like every other spiccato note, not sit in its own
+        separate track.
+
+        Structurally identical to merge_accent_variants (same "look
+        for the corresponding technique among ANY current group's
+        member tracks, not just single-track ones, so multiple midi-fy
+        variants sharing one base label all correctly converge" logic,
+        same "only single-track groups get absorbed" restriction, same
+        "base technique's current name wins" rule) - just matching on
+        the midi-fy prefix instead of Accent/StrongAccent.
+
+        Returns the number of merge operations performed.
+        """
+        merges_done = 0
+        prefix = f"{MIDIFI_SOURCE_LABEL_PREFIX}+"
+
+        for instrument in self.instruments:
+            while True:
+                found_pair = None
+
+                for group in instrument.groups:
+                    if group.is_merged:
+                        continue  # only single-track groups can be absorbed
+
+                    label = group.tracks[0].label
+                    if not label.startswith(prefix):
+                        continue
+
+                    base_label = label[len(prefix):]
+
+                    base_group = next(
+                        (
+                            g for g in instrument.groups
+                            if g.id != group.id
+                            and any(t.label == base_label for t in g.tracks)
+                        ),
+                        None,
+                    )
+                    if base_group is not None:
+                        found_pair = (base_group, group)
+                        break
+
+                if found_pair is None:
+                    break
+
+                base_group, midifi_group = found_pair
+                self.merge_groups([base_group.id, midifi_group.id])
                 merges_done += 1
 
         return merges_done

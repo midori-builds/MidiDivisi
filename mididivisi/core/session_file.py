@@ -61,6 +61,7 @@ from datetime import datetime, timezone
 
 from mididivisi.core.parser import load_score
 from mididivisi.core.session import Session, Instrument, Group
+from mididivisi.core.midifi import MidifiConfig
 from mididivisi.core.settings import settings as live_settings
 from mididivisi.core.profiles import library
 
@@ -108,7 +109,10 @@ def _serialize_session(session):
             }
         )
 
-    return {"instruments": instruments_data}
+    return {
+        "instruments": instruments_data,
+        "midifi_config": session.midifi_config.to_dict(),
+    }
 
 
 def save_session(session, original_score_path, output_path):
@@ -206,8 +210,10 @@ def finish_loading_session(load_result, use_saved_settings):
         ]
         live_settings.save()
 
-    score = load_score(load_result.temp_score_path)
-    fresh_session = Session.from_score(score)
+    saved_midifi_config = MidifiConfig.from_dict(load_result.session_data.get("midifi_config", {}))
+
+    score = load_score(load_result.temp_score_path, midifi_config=saved_midifi_config)
+    fresh_session = Session.from_score(score, midifi_config=saved_midifi_config)
 
     tracks_by_key = {t.natural_key: t for t in fresh_session.tracks}
     identities_by_key = {ident.natural_key: ident for ident in fresh_session.instrument_identities}
@@ -217,6 +223,7 @@ def finish_loading_session(load_result, use_saved_settings):
     new_session.tracks = fresh_session.tracks
     new_session.instrument_identities = fresh_session.instrument_identities
     new_session.tempo_events = fresh_session.tempo_events
+    new_session.midifi_config = fresh_session.midifi_config
 
     for instr_data in load_result.session_data["instruments"]:
         identities = []
