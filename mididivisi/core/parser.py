@@ -9,7 +9,7 @@ rather than per-note marks.
 
 import copy
 
-from music21 import converter, interval, key
+from music21 import converter, interval, key, stream
 
 from mididivisi.core.settings import settings
 from mididivisi.core.midifi import MidifiConfig, resolve_tremolo_midifi, MIDIFI_SOURCE_LABEL_PREFIX
@@ -99,6 +99,7 @@ def load_score(file_path, midifi_config=None):
         resolve_artificial_harmonics(part)
         resolve_divisi(part)
         resolve_tremolo_midifi(part, config)
+        resolve_tremolo_spanner_boundaries(part)
         apply_dynamics_to_part(part)
 
     return score
@@ -308,6 +309,147 @@ def get_trill_interval(n):
         return None
 
 
+def get_tremolo_spanner_interval(n):
+    """Determine the interval between a TremoloSpanner's two sides,
+    for a note/chord n that's part of one. Unlike a plain trill (whose
+    interval isn't written explicitly and has to be inferred from key
+    context), a tremolo spanner's two pitches are BOTH directly
+    written in the score - a straightforward interval computation
+    between them, no inference needed.
+
+    For a chord-to-chord spanner, uses each side's FIRST pitch -
+    matching the same "first-written wins" convention used elsewhere
+    for tremolo spanner's base-chord selection, rather than trying to
+    define "the interval" between two chords that might not even
+    share the same note count.
+
+    Returns None if n isn't part of a TremoloSpanner, or if inference
+    fails for any reason (e.g. a malformed spanner with an unexpected
+    element count) - callers should treat None as "can't label this
+    with an interval" rather than guessing.
+    """
+    spanners = [sp for sp in n.getSpannerSites() if sp.__class__.__name__ == "TremoloSpanner"]
+    if not spanners:
+        return None
+    try:
+        elements = spanners[0].getSpannedElements()
+        if len(elements) != 2:
+            return None
+        first, second = elements
+        first_pitch = first.pitches[0] if first.isChord else first.pitch
+        second_pitch = second.pitches[0] if second.isChord else second.pitch
+        return interval.Interval(first_pitch, second_pitch)
+    except Exception:
+        return None
+
+
+def get_tremolo_spanner_boundary(n):
+    """Given a note/chord n that's part of a TremoloSpanner, determine
+    its two sides IN TEMPORAL (offset) ORDER, the total duration the
+    spanner covers, and its flag count.
+
+    Sorts by offset explicitly rather than trusting
+    getSpannedElements()'s own list order to already match temporal
+    order - even though it does in every real case checked, that's not
+    a documented guarantee.
+
+    Uses getOffsetInHierarchy() rather than raw .offset, deliberately
+    - raw .offset can be relative to an intermediate container (a
+    Voice, for instance) rather than the whole Part, a lesson already
+    paid for once during divisi work. Confirmed directly that raw
+    .offset already happens to match the part-absolute value for
+    every real tremolo spanner note checked (none are Voice-nested),
+    but using the hierarchy-aware method costs nothing and removes the
+    risk entirely rather than relying on that holding true in general.
+
+    Returns (first_element, second_element, total_duration,
+    number_of_marks), or None if n isn't part of a TremoloSpanner, has
+    an unexpected element count, or any of this can't be determined.
+    """
+    spanners = [sp for sp in n.getSpannerSites() if sp.__class__.__name__ == "TremoloSpanner"]
+    if not spanners:
+        return None
+    try:
+        elements = spanners[0].getSpannedElements()
+        if len(elements) != 2:
+            return None
+
+        part = n.getContextByClass(stream.Part)
+        first, second = sorted(elements, key=lambda el: el.getOffsetInHierarchy(part))
+
+        first_offset = first.getOffsetInHierarchy(part)
+        second_end = second.getOffsetInHierarchy(part) + second.duration.quarterLength
+        total_duration = second_end - first_offset
+
+        return (first, second, total_duration, spanners[0].numberOfMarks)
+    except Exception:
+        return None
+
+
+def resolve_tremolo_spanner_boundaries(part):
+    """Pre-computes and STORES each TremoloSpanner's full boundary
+    info (both sides' MIDI pitches, velocity, and articulations, plus
+    total duration, flag count, and starting offset) as a single plain
+    dict attribute directly on BOTH of the spanner's two notes - runs
+    ONCE here, at parse time, rather than being recomputed live every
+    time a track's midi-fy state is queried (see
+    session.realize_track_tremolo_spanner).
+
+    This exists specifically because live recomputation turned out to
+    be unsafe - confirmed directly, not assumed: after a session has
+    been exported even once with a tremolo spanner toggled to its
+    alternating (ON) realization, the SAME original notes'
+    getSpannerSites()/getSpannedElements() no longer find the spanner
+    at all afterward - something in music21's own MIDI-writing process
+    strips this bookkeeping from notes reachable from the stream being
+    written. A plain, fully self-contained stored dict can't be
+    affected by that, since once it's captured here it's ordinary
+    Python data with no further dependency on the notes still being
+    correctly linked into a live music21 spanner/stream graph -
+    including velocity/articulations, captured now rather than read
+    from the live objects later, for the same reason.
+    """
+    seen_spanner_ids = set()
+    for n in part.flatten().notes:
+        if not (n.isNote or n.isChord):
+            continue
+
+        spanners = [sp for sp in n.getSpannerSites() if sp.__class__.__name__ == "TremoloSpanner"]
+        if not spanners:
+            continue
+
+        spanner_id = id(spanners[0])
+        if spanner_id in seen_spanner_ids:
+            continue
+
+        boundary = get_tremolo_spanner_boundary(n)
+        if boundary is None:
+            continue
+
+        seen_spanner_ids.add(spanner_id)
+        first, second, total_duration, marks = boundary
+
+        first_pitches = [p.midi for p in first.pitches] if first.isChord else [first.pitch.midi]
+        second_pitches = [p.midi for p in second.pitches] if second.isChord else [second.pitch.midi]
+        part_ref = n.getContextByClass(stream.Part)
+        base_offset = first.getOffsetInHierarchy(part_ref)
+
+        info = {
+            "spanner_id": spanner_id,
+            "first_pitches": first_pitches,
+            "second_pitches": second_pitches,
+            "first_velocity": first.volume.velocity,
+            "second_velocity": second.volume.velocity,
+            "first_articulations": copy.deepcopy(first.articulations),
+            "second_articulations": copy.deepcopy(second.articulations),
+            "total_duration": total_duration,
+            "marks": marks,
+            "base_offset": base_offset,
+        }
+        first.mididivisi_tremolo_spanner_info = info
+        second.mididivisi_tremolo_spanner_info = info
+
+
 def get_note_level_label(n):
     """Build a label describing the per-note articulation/technique
     markings on a single Note or Chord - the ones attached directly to
@@ -337,7 +479,10 @@ def get_note_level_label(n):
 
     for sp in n.getSpannerSites():
         cls = sp.__class__.__name__
-        if cls in ("TremoloSpanner", "Glissando"):
+        if cls == "TremoloSpanner":
+            size = get_tremolo_spanner_interval(n)
+            labels.append(f"Tremolo-{size.name}" if size is not None else cls)
+        elif cls == "Glissando":
             labels.append(cls)
 
     seen = []

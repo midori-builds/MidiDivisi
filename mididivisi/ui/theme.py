@@ -158,6 +158,73 @@ def build_stylesheet():
             border: 1px solid {c['accent']};
         }}
 
+        /* Checkboxes had NO explicit styling at all before this -
+           relying entirely on native OS rendering. That's exactly
+           what made them turn invisible on macOS dark mode: a
+           natively-drawn dark-mode indicator has no awareness this
+           app's theme is light, so it can render with poor/no
+           contrast against our own light row background. Every pixel
+           is controlled explicitly here instead, so appearance is
+           consistent regardless of the OS's own light/dark setting.
+           Checked state uses a solid accent fill rather than a drawn
+           checkmark glyph - avoids needing an image asset bundled
+           with the app, and a solid color-fill difference is already
+           clearly readable on its own. */
+        QCheckBox {{
+            color: {c['text']};
+            spacing: 6px;
+        }}
+
+        QCheckBox::indicator {{
+            width: 15px;
+            height: 15px;
+            border: 1.5px solid {c['text_muted']};
+            border-radius: 3px;
+            background: {c['bg_content']};
+        }}
+
+        QCheckBox::indicator:hover {{
+            border: 1.5px solid {c['accent']};
+        }}
+
+        QCheckBox::indicator:checked {{
+            background: {c['accent']};
+            border: 1.5px solid {c['accent']};
+        }}
+
+        QCheckBox::indicator:disabled {{
+            background: {c['bg_toolbar']};
+            border: 1.5px solid {c['border']};
+        }}
+
+        /* A SEPARATE, genuinely different Qt selector from the
+           QCheckBox rules above - this covers the tree's own NATIVE
+           checkable-item indicator (ItemIsUserCheckable), used for
+           the main per-row track-selection checkboxes in both the
+           main tree and the Export dialog's inclusion tree. These are
+           NOT QCheckBox widgets at all, so the rules above never
+           touched them - confirmed directly this was the actual
+           remaining gap (the KS/Midi-fy checkboxes ARE real QCheckBox
+           widgets and were already covered; the main selection
+           checkboxes specifically were not). Matches the same visual
+           design as QCheckBox::indicator above for consistency. */
+        QTreeView::indicator {{
+            width: 15px;
+            height: 15px;
+            border: 1.5px solid {c['text_muted']};
+            border-radius: 3px;
+            background: {c['bg_content']};
+        }}
+
+        QTreeView::indicator:hover {{
+            border: 1.5px solid {c['accent']};
+        }}
+
+        QTreeView::indicator:checked {{
+            background: {c['accent']};
+            border: 1.5px solid {c['accent']};
+        }}
+
         QSpinBox {{
             background: {c['bg_content']};
             color: {c['text']};

@@ -41,8 +41,19 @@ Groups are currently owned by which Instrument.
 
 import uuid
 
-from mididivisi.core.parser import get_part_articulation_groups, get_tempo_timeline, get_trill_interval
-from mididivisi.core.midifi import MidifiConfig, MIDIFI_SOURCE_LABEL_PREFIX, realize_trill_notes
+from mididivisi.core.parser import (
+    get_part_articulation_groups,
+    get_tempo_timeline,
+    get_trill_interval,
+)
+from mididivisi.core.midifi import (
+    MidifiConfig,
+    MIDIFI_SOURCE_LABEL_PREFIX,
+    realize_trill_notes,
+    realize_tremolo_spanner_notes,
+    collapse_tremolo_spanner_to_base,
+)
+from music21 import chord as m21chord, pitch as m21pitch
 import copy
 
 
@@ -97,6 +108,100 @@ def realize_track_trills(notes, midifi_config):
     return result
 
 
+def realize_track_tremolo_spanner(notes, toggle_active):
+    """Given a track's ORIGINAL notes (untouched), return a NEW list
+    where every measured tremolo spanner passage is replaced by EITHER:
+    - toggle_active=False (the default): ONE sustained chord at the
+      first-written side's pitch(es), spanning the full duration (see
+      midifi.collapse_tremolo_spanner_to_base) - a REAL transformation,
+      unlike trill's off state, replacing the OLD placeholder that
+      kept the original written rhythm (which re-triggered a sustained
+      patch mid-phrase unnecessarily).
+    - toggle_active=True: the full alternating realization (see
+      midifi.realize_tremolo_spanner_notes).
+
+    This is the real architectural generalization tremolo spanner
+    needed beyond trill: trill's "off" just meant "return the
+    originals" (a plain trill mark IS one note, nothing to compute).
+    Tremolo spanner has no such free case - BOTH states require real
+    computation, so this function is called regardless of
+    toggle_active, unlike realize_track_trills which only gets called
+    when the toggle is actually on.
+
+    Reads boundary info from the plain
+    `mididivisi_tremolo_spanner_info` dict already stored on the note
+    by parser.resolve_tremolo_spanner_boundaries at PARSE time, rather
+    than calling live spanner detection here - a real bug this
+    fixes, not a stylistic choice: confirmed directly that after a
+    session has been exported even once with this realization active,
+    the SAME original notes' getSpannerSites() no longer finds their
+    spanner at all (something in music21's own MIDI-writing process
+    strips that bookkeeping from notes reachable from the stream being
+    written). Reading a plain, fully self-contained stored dict
+    instead - including pitches, velocity, AND articulations, all
+    captured once while the live objects were still guaranteed intact
+    - makes this function correct regardless of how many times export
+    has already run.
+
+    A tremolo spanner's two written sides BOTH appear as separate
+    entries in `notes` - processed only once, at whichever side is
+    encountered FIRST while iterating (recognized via the stored
+    info's own "spanner_id", not object identity of the notes
+    themselves) - the second side's original entry is dropped
+    entirely, absorbed into the single realized/collapsed result
+    emitted at the first side's position.
+
+    Output is ALWAYS a music21 Chord, even for a single pitch -
+    confirmed directly this exports identically to a plain Note (same
+    note_on/note_off pair), and it avoids having to switch between
+    Note and Chord shapes depending on how many pitches a given slot
+    has, which a straight deepcopy-then-mutate approach (the pattern
+    used for trill) can't safely do when the shape itself needs to
+    change.
+
+    Never mutates the input list or any note within it.
+    """
+    result = []
+    processed_spanner_ids = set()
+
+    for n in notes:
+        info = getattr(n, "mididivisi_tremolo_spanner_info", None)
+        if info is None:
+            result.append(n)
+            continue
+
+        spanner_id = info["spanner_id"]
+        if spanner_id in processed_spanner_ids:
+            continue  # the OTHER side of this spanner already produced the result
+        processed_spanner_ids.add(spanner_id)
+
+        first_pitches = info["first_pitches"]
+        second_pitches = info["second_pitches"]
+        total_duration = info["total_duration"]
+        marks = info["marks"]
+        base_offset = info["base_offset"]
+
+        if toggle_active:
+            realized = realize_tremolo_spanner_notes(first_pitches, second_pitches, total_duration, marks)
+        else:
+            realized = collapse_tremolo_spanner_to_base(first_pitches, total_duration)
+
+        for i, (pitches, rel_offset, duration) in enumerate(realized):
+            is_first_side = (i % 2 == 0)
+            velocity = info["first_velocity"] if is_first_side else info["second_velocity"]
+            articulations = info["first_articulations"] if is_first_side else info["second_articulations"]
+
+            new_chord = m21chord.Chord([m21pitch.Pitch(midi=p) for p in pitches])
+            new_chord.duration.quarterLength = duration
+            new_chord.offset = base_offset + rel_offset
+            new_chord.volume.velocity = velocity
+            new_chord.articulations = copy.deepcopy(articulations)
+
+            result.append(new_chord)
+
+    return result
+
+
 class Track:
     """One base articulation group, as originally detected by the
     parser. Created once at load time and never destroyed - identity
@@ -126,19 +231,41 @@ class Track:
 
     def get_active_notes(self, midifi_config=None):
         """Returns this track's notes as they should currently be
-        displayed/exported - the original untouched notes if the
-        toggle is off (or no config is given, e.g. an older caller
-        that hasn't been updated), or a freshly-computed realization
-        if it's on.
+        displayed/exported - dispatches by content type, since
+        different midi-fy features need genuinely different "off"
+        semantics, not just "toggle on vs off":
+        - Tremolo spanner (label contains "Tremolo-" with an interval,
+          e.g. "Tremolo-M3" - distinct from single-note tremolo's bare
+          "Tremolo" label): BOTH states are real transformations - off
+          collapses to one sustained chord (the new default,
+          replacing the old placeholder), on alternates between the
+          spanner's two sides. Always computed, regardless of toggle
+          state.
+        - Everything else (trill, or no midi-fy-toggleable content at
+          all): the original, simpler case - off means "return the
+          untouched originals" (nothing to compute), on realizes via
+          realize_track_trills.
 
-        Computed on demand every call rather than cached - trill
+        No config given (e.g. an older caller that hasn't been
+        updated) always falls back to the untouched originals,
+        uniformly across every content type - a simple, safe default
+        even though tremolo spanner doesn't strictly need config
+        VALUES for its own computation.
+
+        Computed on demand every call rather than cached - this
         realization is cheap (simple arithmetic over at most a few
         hundred notes), and NOT caching sidesteps any risk of a stale
-        cache if midifi_config changes while the toggle is active
-        (e.g. the rate is later adjusted) - the next call just
-        reflects whatever the current config says, automatically.
+        cache if midifi_config changes while a toggle is active (e.g.
+        trill's rate is later adjusted) - the next call just reflects
+        whatever the current config says, automatically.
         """
-        if not self.midifi_toggle_active or midifi_config is None:
+        if midifi_config is None:
+            return self.notes
+
+        if "Tremolo-" in self.label:
+            return realize_track_tremolo_spanner(self.notes, self.midifi_toggle_active)
+
+        if not self.midifi_toggle_active:
             return self.notes
         return realize_track_trills(self.notes, midifi_config)
 

@@ -157,6 +157,61 @@ def realize_trill_notes(main_pitch_midi, upper_pitch_midi, total_duration, notes
     return result
 
 
+def realize_tremolo_spanner_notes(first_pitches_midi, second_pitches_midi, total_duration, number_of_marks):
+    """PURE function - given the two SIDES of a measured tremolo
+    spanner (each a list of MIDI pitch numbers - a single-element list
+    for a plain note, multiple for a chord), the total duration to
+    fill, and the tremolo's flag count, returns a list of
+    (pitches_tuple, offset, duration) for the ON-state realization:
+    alternating between the two sides for 2^number_of_marks total
+    slots, evenly dividing the duration.
+
+    Reuses the SAME "N flags -> 2^N notes" relationship already
+    proven for single-note tremolo (resolve_tremolo_midifi below),
+    just applied to a spanner's combined duration instead of one
+    note's duration - and generalized to a LIST of simultaneous
+    pitches per slot rather than a single pitch, so a note-to-note and
+    a chord-to-chord tremolo (even with mismatched note counts on each
+    side) are both handled by this one function.
+
+    Deliberately no external rate parameter, unlike trill - flag count
+    directly and unambiguously determines the count here, there's no
+    speed ambiguity to solve the way trill's realization needed one.
+    """
+    if total_duration <= 0 or number_of_marks <= 0:
+        return []
+
+    note_count = 2 ** number_of_marks
+    each_duration = total_duration / note_count
+
+    result = []
+    for i in range(note_count):
+        pitches = first_pitches_midi if i % 2 == 0 else second_pitches_midi
+        offset = i * each_duration
+        result.append((tuple(pitches), offset, each_duration))
+
+    return result
+
+
+def collapse_tremolo_spanner_to_base(first_pitches_midi, total_duration):
+    """PURE function - the OFF-state (default) transformation for a
+    measured tremolo spanner: ONE sustained note/chord at the FIRST-
+    WRITTEN side's pitch(es), spanning the tremolo's full duration.
+
+    Deliberately its own named, testable unit rather than an inline
+    one-liner - unlike trill (where "off" just means "return the
+    untouched original," nothing to compute), tremolo spanner's off
+    state IS a real transformation, replacing the old placeholder
+    (which kept the original written rhythm, producing multiple same-
+    pitch note-on events that would re-trigger a sustained patch mid-
+    phrase unnecessarily). One note-on/note-off pair instead, letting
+    a dedicated tremolo/roll patch handle the passage uninterrupted.
+    """
+    if total_duration <= 0:
+        return []
+    return [(tuple(first_pitches_midi), 0, total_duration)]
+
+
 def resolve_tremolo_midifi(part, config):
     """Realize single-note tremolo (expressions.Tremolo - NOT
     TremoloSpanner, the two-pitch alternating case, which is always

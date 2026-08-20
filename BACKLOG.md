@@ -14,14 +14,13 @@ that original list, and it's the next natural thing to build** - see
 its own section below for the full design (already substantially
 fleshed out, not starting from scratch).
 
-Also actively being designed: **midi-fy** (`core/midifi.py`) is the
+Also actively being built: **midi-fy** (`core/midifi.py`) is the
 shared foundation for turning notated techniques into real MIDI
-events. Tremolo is built; trills are next and already have real design
-substance decided (see "Midi-fy features not yet built" below for the
-full detail - UI shape, the instant-toggle architecture change it
-requires, speed representation, and the classification-defaults
-design), with basic oscillation trills as the actual next thing to
-build.
+events. Tremolo (single-note), trills (basic oscillation), and
+tremolo spanner are all done - see "Midi-fy features" below for
+what's left (arpeggio, glissando, legato, and the shared instrument/
+interval classification system trill and tremolo spanner both still
+need).
 
 ## Auto Condensing / Score Condensing
 
@@ -61,35 +60,54 @@ DEVLOG.md for the full reasoning behind each decision below).
 - Whether condensed tracks need their own distinct visual treatment in
   the tree (e.g. an indicator similar to the "M" merge marker).
 
-## Midi-fy features not yet built
+## Midi-fy features
 
-Tremolo (single-note) is done. These are meant to reuse the same
-`core/midifi.py` foundation (`MidifiConfig`, the "rebuild from source"
-strategy, session-level persistence) rather than build parallel
-one-off systems - though trills are already revealing that different
-midi-fy features want genuinely different CONFIG SCOPES (tremolo's
-threshold is session-wide; trill classification is per-instrument;
-glissando/legato look like they'll want per-profile) - worth staying
-alert to that rather than forcing everything into tremolo's shape.
+`core/midifi.py` is the shared foundation for turning notated
+techniques into real MIDI events. Different features have turned out
+to need genuinely different CONFIG SCOPES - tremolo's threshold is
+session-wide, trill/tremolo-spanner classification will be per-
+instrument, glissando/legato look like they'll want per-profile -
+worth staying alert to that rather than forcing everything into one
+shape.
 
-- **Trills (basic oscillation) - DONE.** Toggle per trill-labeled row
-  in the tree, instant on/off (no session rebuild - realization is
-  computed fresh on demand, never baked in destructively), rate
-  configurable per-project in the Midi-fy window. Full implementation
-  history and verification detail in DEVLOG.md.
-  **Still deferred, exactly as originally scoped** ("something to add
-  after basic trills" - not a gap, a deliberate sequencing decision):
-  - Instrument classification (oscillation vs. tremolo-style, e.g.
-    timpani) - lives in the Midi-fy window per-project, with a
-    separate global-defaults editor + restore-to-defaults action. Full
-    design already agreed (see DEVLOG.md), just not built yet.
-  - Speed shape beyond linear (curves, custom), velocity shape, and a
-    humanizer - all deliberately hardcoded/off for the MVP, but the
-    generation function already takes them as real parameters with
-    hardcoded defaults, so this should be wiring, not restructuring,
-    when it's tackled.
-  - Velocity currently comes straight from the dynamic marking only -
-    not yet layering in accent/tenuto/other per-note articulations.
+**Done** (full implementation history and verification detail for
+each in DEVLOG.md):
+- Tremolo (single-note) - realizes below-threshold flag counts into
+  discrete repeated notes.
+- Trills (basic oscillation) - per-row toggle, instant, rate
+  configurable per-project. Stress-tested against 15 real trills
+  across 4 instruments in `Woods.musicxml`, no bugs found - and in
+  the process, disproved a previously-listed gap: accented trills
+  already correctly get the accent velocity boost for free (measured
+  110 vs. 96), since realization deep-copies the already-fully-
+  processed original note.
+- Tremolo spanner (measured 2-note/chord tremolo) - same toggle
+  mechanism as trill, but with a real generalization: the off state
+  is ALSO a transformation here (collapses to one sustained note/
+  chord for a dedicated patch), not a no-op. A real correctness bug
+  was found and fixed during this work (exporting once while toggled
+  on was silently corrupting the same passage's ability to be
+  correctly toggled again afterward) - see DEVLOG.md for the full
+  story.
+
+**Not yet built:**
+- **Instrument/interval classification system** - needed by BOTH
+  trill (oscillation vs. tremolo-style, e.g. timpani) and tremolo
+  spanner (some owned libraries have dedicated 3rd-interval trill
+  patches that shouldn't be midi-fied) - the same system, not two
+  separate ones. Lives in the Midi-fy window per-project, with a
+  separate global-defaults editor + restore-to-defaults action - full
+  design already agreed (see DEVLOG.md). Genuinely narrow impact for
+  trill specifically (the current oscillation default is already
+  correct for the vast majority of real usage - strings, most
+  woodwinds/brass); tremolo spanner already has the interval data
+  this needs sitting in its label, ready for whenever this gets
+  built.
+- Trill speed shape beyond linear (curves, custom) and a humanizer -
+  both deliberately hardcoded/off for the MVP, but the generation
+  function already takes them as real parameters with hardcoded
+  defaults, so this should be wiring, not restructuring, when
+  tackled.
 - **Arpeggio** - a chord marked `<arpeggiate>`. No sample library has
   an "arpeggio patch" - needs to become real staggered note-on events.
   Direction-aware (up/down/non-arpeggio) data is already retrievable
@@ -124,15 +142,6 @@ alert to that rather than forcing everything into tremolo's shape.
     how divisi/harmonics both handle their own ambiguous-shape cases),
     with "skip just the chord and its immediate neighbors, legato the
     rest" as a possible middle-ground refinement - not decided.
-- **Tremolo spanner (measured 2-note tremolo)** - currently exported
-  by overriding both notes' pitch to the lower of the pair while
-  keeping the original written rhythm - a deliberately conservative
-  placeholder, not a real "midi-fy" realization yet. Some libraries
-  expect a simultaneous dyad instead of a bottom-note substitution.
-  Longer-term: separate "detection" from "realization strategy" (a
-  choosable setting - global default → profile default → per-track
-  override), same shape the tremolo threshold work is already moving
-  toward.
 - **Caveat for whoever builds any of these**: music21's importer
   silently defaults to `numberOfMarks = 3` if a `<tremolo>` element is
   malformed or missing its count entirely - an observed "3" could
@@ -218,7 +227,7 @@ Verovio, zoom/fit, working text labels) is done. Not yet built:
 
 - **Exported `note_on` count doesn't match parsed note/chord object
   count, gap unexplained** - found while testing the trill toggle
-  mechanism (see "Midi-fy features not yet built" above), confirmed
+  mechanism (see "Midi-fy features" above), confirmed
   unrelated to that work specifically (the same gap exists via the
   pre-existing code path too, not something the toggle introduced).
   For `String_Test_Piece.musicxml`: 293 parsed note/chord objects,

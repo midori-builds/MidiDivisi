@@ -1373,3 +1373,325 @@ tree UI toggle; (4) rate config in the Midi-fy window.
     - Treating a trill as a tremolo (timpani-style) is NOT a separate
       mechanism - it's just one of the two values this same
       classification setting can take.
+
+## Checkbox styling and click-anywhere row selection
+
+Two related UI fixes, tackled together since the user raised them in
+the same message.
+
+**Checkbox invisibility on macOS dark mode.** Confirmed directly
+(grepped theme.py) that `QCheckBox` had ZERO explicit styling
+anywhere - it had been relying entirely on native OS rendering this
+whole time. That's exactly what made it break: a natively-drawn
+dark-mode indicator has no awareness this app's own theme is light,
+so it can render with poor/no contrast against the app's own light
+row background. Fixed by adding a real `QCheckBox`/
+`QCheckBox::indicator` block to theme.py's stylesheet, using the
+existing color tokens (accent blue for checked, matching what's
+already used elsewhere for consistency) - every pixel now explicitly
+controlled rather than deferred to native rendering. Checked state
+uses a solid color fill rather than a drawn checkmark glyph,
+deliberately - avoids needing an image asset bundled with the app,
+and a fill-color difference alone is already clearly readable.
+Verified the stylesheet is syntactically valid and actually gets
+applied (main.py already calls `app.setStyleSheet(build_stylesheet())`
+globally) - actual visual contrast on a real Mac in dark mode can only
+be confirmed by the user's own eyes, same limitation as any other
+purely visual/rendering question this session.
+
+**Checkboxes were never meant to be the ONLY way to select tracks.**
+User clarified a long-standing but never-validated design decision:
+`self.tree.setSelectionMode(NoSelection)` had been set explicitly at
+some point, disabling ALL native row selection/highlighting entirely
+and making the tiny checkbox glyph the sole interaction target - not
+what was originally intended. What was actually wanted, confirmed
+directly: clicking ANYWHERE on a row (except another embedded control
+- Profile button, KS/Midi-fy checkboxes, Preview button) should behave
+EXACTLY like clicking that row's own checkbox - a bigger, more
+forgiving hit target for the SAME existing toggle, not a second,
+separate selection mechanism to build and keep in sync. Framed by the
+user as "I don't want to play an FPS game just to hit that checkbox."
+
+This turned out to be structurally much simpler than the initial
+proposal (which assumed full native `ExtendedSelection` with Ctrl/
+Cmd/Shift semantics, requiring bidirectional sync between two
+independent state systems and raising a real question about whether
+native multi-select's click order could still drive the existing
+merge-naming logic). Once the actual ask was "just a bigger click
+target for the existing per-row toggle, every click independently
+additive, nothing replaces anything else" - no separate selection
+concept was needed at all, and the existing `check_order`-based merge-
+naming logic required zero changes.
+
+Implementation required real care around two genuine mechanical risks,
+both verified directly rather than assumed, via a real simulated
+`QTest.mouseClick` at exact pixel positions (not guessed at from
+documentation):
+
+1. **Double-toggle risk on the glyph itself.** Confirmed directly:
+   clicking the checkbox glyph fires `itemChanged` (native toggle)
+   BEFORE `itemClicked` - meaning a naive "toggle on itemClicked"
+   handler would toggle twice for a glyph click (once natively, once
+   from the handler), cancelling itself out. Fixed via a guard flag
+   set in `on_item_changed` whenever a genuine check-state change (not
+   a text rename) is detected, consumed by the very next
+   `itemClicked`. The rename-vs-toggle discrimination itself is simple
+   and doesn't need any state-tracking: `COL_NAME`'s data can only
+   ever change for one of those two reasons, so "text didn't change"
+   is a complete, correct signal that it must have been a toggle.
+
+2. **Double-click-to-rename side effect.** `itemClicked` also fires on
+   the first half of a double-click, and double-clicking a row is how
+   renaming (native Qt inline editor) and splitting (COL_MERGED)
+   already work - without a guard, every rename/split attempt would
+   ALSO flip the checkbox as an unwanted side effect. Fixed via a
+   standard debounce: the actual toggle is delayed by
+   `QApplication.doubleClickInterval()`, cancelled in
+   `on_item_double_clicked` if a genuine double-click follows within
+   that window.
+
+**A real bug found and fixed during testing, not just a theoretical
+edge case avoided in advance**: the debounced toggle's own
+`setCheckState()` call (from `_perform_pending_toggle`) ALSO fires
+`itemChanged`, which was incorrectly setting the SAME glyph-click
+guard from point 1 above - even though no `itemClicked` was ever
+coming to consume it, since this path is timer-triggered, not a fresh
+mouse click. That left a stale guard silently swallowing the very
+NEXT real click on that row entirely (confirmed directly: a second
+click on an already-toggled row did nothing at all). Fixed with an
+explicit `_programmatic_toggle_in_progress` flag, set only around that
+one specific internal call, so `on_item_changed` can tell its own
+timer-driven toggle apart from a genuine native glyph click.
+
+Visual highlight (background/foreground color) mirrors check state
+directly inside `on_item_changed` - deliberately not using Qt's native
+row-selection mechanism at all for this, matching the simplified
+design: a color derived purely from check state can't drift out of
+sync with it, since there's only ever one source of truth, with no
+second state to keep synchronized.
+
+Verified thoroughly through real simulated interaction (not just
+calling internal methods directly): clicking row text toggles after
+the debounce, clicking the glyph directly still produces exactly one
+toggle, a genuine double-click does NOT also toggle, the embedded
+Preview button still works correctly and is completely unaffected,
+the visual highlight correctly mirrors check state in both directions,
+and - the actual motivating use case - clicking two different rows in
+sequence (via plain row clicks, not the tiny glyph) correctly drives
+`check_order` and produces the correct click-order-based merge name,
+through a REAL `merge_selected()` call, not just inspecting internal
+state.
+
+**A real test-methodology trap hit and correctly diagnosed along the
+way**: an early version of the multi-row test appeared to hang/fail
+with `check_order` showing only one item after two clicks. Root cause,
+found by testing rather than guessing: `visualItemRect()` returns
+coordinates in the tree's full virtual/scrollable content space, not
+constrained to what's currently visible in a small viewport - the
+second target row was genuinely scrolled out of view, so a "click" at
+its nominal coordinates hit nothing at all (confirmed directly via a
+raw, independent `itemClicked` listener showing zero firings).
+Diagnosed with `scrollToItem()` before vs. after comparison, not
+assumed - same class of "offscreen/headless environment gotcha" this
+project has hit before with `isVisible()` needing a real `.show()`.
+Not a bug in the application code at all, purely a test-harness gap.
+
+Full regression confirmed clean across all three real test files
+(identical note counts to every prior confirmed baseline).
+
+## Checkbox styling gap #2, and correcting the selection semantics
+
+Two follow-ups to the previous checkbox/selection work, from the same
+conversation.
+
+**Remaining checkbox styling gap, found by searching rather than
+assuming.** User reported the Midi-fy checkbox looked correctly styled
+but others didn't. Both KS and Midi-fy are real `QCheckBox` widgets,
+already covered by the earlier fix - so the report pointed at
+something else. Grepped for every `ItemIsUserCheckable` usage in the
+codebase and found the real gap: the MAIN per-row track-selection
+checkboxes (used for the whole click-anywhere-to-select feature) are
+NOT `QCheckBox` widgets at all - they're the tree's own native
+checkable-item rendering, which Qt styles via a completely different
+selector (`QTreeView::indicator`, not `QCheckBox::indicator`) that the
+previous fix never touched. Also found, by searching rather than
+guessing there'd only be one place: `export_dialog.py` has its own
+tree with checkable items, which had the exact same gap. Fixed by
+adding a `QTreeView::indicator` block to theme.py matching the same
+visual design as the existing `QCheckBox::indicator` rule - applies
+globally to both trees since the stylesheet is application-level.
+
+**Selection semantics were built wrong the first time, corrected
+here.** The earlier click-anywhere-to-select implementation made every
+click independently toggle just that one row, with no "replace the
+selection" behavior at all - based on an interpretation that turned
+out not to match what was actually wanted. User clarified directly:
+standard Finder/Explorer semantics were the actual intent - plain
+click selects ONLY that row (deselecting anything else), Cmd/Ctrl-
+click toggles just that one row while leaving everything else alone.
+Worth being direct about: this was a real misunderstanding on the
+first pass, not a refinement.
+
+Implementation added a shared `_enforce_replace_selection(item)`
+helper (uncheck everything else, used by both the debounced row-click
+path and the native-glyph-click path) and modifier-key detection via
+`QApplication.keyboardModifiers()`, captured AT CLICK TIME (not re-
+read later when the debounce timer fires, since the key may no longer
+be held by then). The native glyph-click case needed its own specific
+handling: Qt's own click handling has already performed the toggle by
+the time this code sees it (confirmed in the earlier session), so
+"replace selection" for a plain glyph click is enforced AFTER the
+fact rather than before - there's no way to intercept Qt's native
+toggle ahead of it happening.
+
+Verified all five real interaction patterns through actual simulated
+clicks with real modifier keys, not just internal state manipulation:
+plain click selects only that row; a second plain click on a different
+row correctly replaces the selection; Cmd-click adds without
+replacing; Cmd-click on an already-checked row toggles it off alone;
+a plain click on an already-solely-selected row is a correct no-op.
+Also re-verified the native glyph-click path enforces the same
+replace-selection behavior, the double-click-doesn't-also-toggle guard
+still holds after the rewrite, and the actual real-world payoff this
+whole feature exists for - plain-click one row then Cmd-click another,
+then a real `merge_selected()` call - still correctly produces
+click-order-based merge naming through the corrected semantics.
+
+Full regression confirmed clean across all three real test files.
+
+## Selection semantics corrected again, and the debounce removed for latency
+
+Two more real corrections to the same feature, from a direct, blunt
+"you're testing my patience" - worth being honest that this took
+three passes to get right, not two.
+
+**The real rule was per-click-TARGET, not per-modifier-key.** The
+previous version applied "replace unless Cmd/Ctrl held" uniformly to
+BOTH the checkbox glyph AND clicking elsewhere on the row - which was
+still wrong. Clarified directly: the checkbox glyph should ALWAYS be
+purely additive, full stop, regardless of any modifier - because being
+additive-without-needing-a-modifier IS the entire reason the checkbox
+exists as a separate thing at all. Making it ALSO sometimes replace
+the selection would defeat that purpose entirely. Only clicking
+elsewhere on the row (name text, Merged column) follows the
+modifier-gated replace-vs-add rule. Fixed by simply removing the
+"enforce replace selection" call from the glyph-click reaction branch
+entirely - it's now a pure toggle-and-return, no modifier check
+needed there at all.
+
+**The debounce was real, felt latency for a problem that turned out
+to be harmless either way - removed entirely.** User reported
+selection felt "laggy and uncomfortable," which traced directly to
+the `QApplication.doubleClickInterval()` debounce added to prevent a
+double-click (rename/split) from also toggling the checkbox on its
+first click. Reconsidered the actual cost of NOT debouncing: a
+double-click-to-rename also leaving that row selected is a sensible,
+unsurprising outcome (you just interacted with it), and a double-
+click-to-split (COL_MERGED) triggers a full `refresh_tree()` rebuild
+regardless, which wipes any selection state either way - so the thing
+the debounce was protecting against was never actually harmful.
+Removed the whole timer-based mechanism (`_pending_toggle_timer`,
+`_pending_toggle_item`, `_pending_toggle_additive`,
+`_perform_pending_toggle` all deleted) and apply the toggle
+synchronously, immediately, inside `on_tree_item_clicked` itself.
+
+**A real bug caught by reasoning through the refactor before testing,
+not found empirically this time**: `_enforce_replace_selection` had
+been managing `_programmatic_toggle_in_progress` internally (setting
+it True, then False at its own end) - but the caller now needs that
+flag held across BOTH that call AND its own subsequent "ensure item is
+checked" step as ONE guarded block. Left as-was, the nested call would
+have cleared the flag partway through the caller's still-in-progress
+work, re-triggering the exact same stale-guard bug pattern found and
+fixed once already (a real click on that row afterward getting
+silently swallowed). Fixed by moving flag management entirely to the
+one remaining caller, since `_enforce_replace_selection` no longer has
+multiple call sites competing for the same flag.
+
+Verified thoroughly through real simulated clicks with real modifier
+keys, explicitly WITHOUT any wait/delay this time (the whole point
+being to confirm the lag is gone): name-click applies instantly with
+no wait; a second plain name-click on a different row still correctly
+replaces the selection, instantly; the glyph is confirmed additive
+even with NO modifier held (the specific case that was wrong before);
+a second glyph click on the same item correctly toggles it back off
+without touching others; Cmd-click via the name area still adds
+without replacing.
+
+**A real test-environment limitation hit and correctly diagnosed,
+not worked around by weakening the fix**: `QTest.mouseDClick` produced
+zero signal firings for double-click verification, even in a
+completely minimal, isolated tree with no application code involved
+at all - confirmed this is a genuine offscreen-Qt-platform limitation
+in this environment, not a regression, by testing the exact same
+double-click simulation outside the app entirely. Rather than chase
+an unreliable test method further, verified what actually matters
+directly: `Session.split_group()` itself (called by
+`on_item_double_clicked`, which had only 2 now-dead debounce-
+cancellation lines removed, nothing else touched) still works
+correctly when called directly, confirming there's no real regression
+risk in the logic itself even though the UI-level double-click
+couldn't be automated-verified in this specific environment.
+
+Full regression confirmed clean across all three real test files.
+
+## Tremolo spanner interval detection
+
+Design discussion for tremolo spanner's on/off toggle (the next midi-
+fy feature after trills) surfaced a real mistake worth recording
+honestly: claimed tremolo spanner labels already carried interval
+info ("Tremolo-M3" vs "Tremolo-m2"), pattern-matching from how Trill
+already works, without actually checking. They didn't - the label was
+just the bare class name "TremoloSpanner". Caught by checking the
+actual code rather than continuing to assert it, then corrected
+directly with the user rather than silently fixing it and moving on.
+
+This mattered because the user's own reasoning about a real use case -
+some owned libraries have dedicated trill patches specifically for
+minor/major 3rds, which shouldn't be midi-fied - depends on the
+interval actually being visible per-group, exactly the same way trill
+already lets a user judge "does this look like something my library
+handles."
+
+**Built now, bundled into the design discussion rather than deferred**:
+`get_tremolo_spanner_interval()` in parser.py, mirroring
+`get_trill_interval()`'s shape but genuinely simpler - a tremolo
+spanner's two pitches are BOTH directly written in the score (via
+`spanner.getSpannedElements()`, confirmed via real data to always
+return exactly 2 elements), so this is a direct interval computation,
+no key-signature-based inference needed the way trill required.
+`get_note_level_label()` updated to use this for TremoloSpanner
+specifically (Glissando, which shares the same spanner-detection loop,
+untouched).
+
+Verified against real, not synthetic, data first: `Mysterious_
+Journey...musicxml` has real tremolo spanner content across 3
+different instruments (Piccolo, Harp, Viola) - EVERY interval found
+turned out to be a 3rd (major or minor), directly validating the
+motivating use case without needing to go looking for one. Also
+found a `Tremolo-P4` in Harp that hadn't shown up in an initial
+narrower check - a reminder to scan broadly rather than stop at the
+first confirming example.
+
+The chord-to-chord case (mismatched note counts between the two
+sides) has no example in any of the 3 real test files, so verified it
+directly via constructing a TremoloSpanner between a 2-note and a
+3-note chord through music21's own API rather than leaving it
+unverified - confirmed the interval correctly uses each side's first
+pitch, correctly handles the mismatched count, and gives the same
+result regardless of which side of the spanner it's queried from.
+Also verified the full label pipeline end-to-end for this case (not
+just the raw interval function), and confirmed a plain, unmarked note
+is completely unaffected.
+
+One real API-name trap hit and fixed quickly: `TremoloSpanner` lives
+in `music21.expressions`, not `music21.spanner` as a first attempt
+assumed (an easy mistake given most other spanner-family classes DO
+live in `music21.spanner`) - caught immediately via an AttributeError
+rather than silently producing a wrong result.
+
+Full regression confirmed clean across all three real test files -
+this was a pure additive labeling change, not a behavior change to
+anything downstream yet (the actual on/off toggle, and the off-
+state's collapse-to-one-sustained-note behavior, are separate, not-
+yet-built work - see BACKLOG.md for the full agreed design).

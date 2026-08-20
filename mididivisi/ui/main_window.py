@@ -26,7 +26,7 @@ Three areas, per the current UI design:
 
 import os
 
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt, QSize, QTimer
 from PyQt6.QtGui import QAction, QColor
 from PyQt6.QtWidgets import (
     QMainWindow,
@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QCheckBox,
     QLabel,
+    QApplication,
 )
 
 from mididivisi.core.parser import load_score
@@ -103,6 +104,26 @@ class MainWindow(QMainWindow):
         # because "first checked" determines the resulting name on
         # merge, and that's about click ORDER, not tree position.
         self.check_order = []
+
+        # Support for "click anywhere on a row toggles its checkbox"
+        # (see on_tree_item_clicked) - a row's own tiny checkbox glyph
+        # remains clickable too (Qt's native behavior), which creates
+        # a real double-toggle risk if not guarded against: verified
+        # directly that a glyph click fires itemChanged BEFORE
+        # itemClicked, so this flag records "a genuine check-state
+        # toggle (not a text rename) just happened via itemChanged"
+        # for the immediately-following itemClicked to consume and
+        # skip re-toggling.
+        self._just_toggled_via_indicator = None
+
+        # Set while our OWN programmatic setCheckState calls are in
+        # flight - a real bug this caught directly (not theoretical):
+        # without it, our own call ALSO fires itemChanged, which would
+        # incorrectly set the glyph-click guard above even though no
+        # itemClicked is coming to ever consume it - leaving a stale
+        # guard that silently eats the next real click on that row
+        # entirely. Lets on_item_changed tell the two sources apart.
+        self._programmatic_toggle_in_progress = False
 
         self._build_menu_bar()
         self._build_toolbar()
@@ -312,6 +333,7 @@ class MainWindow(QMainWindow):
         self.tree.setSelectionMode(QTreeWidget.SelectionMode.NoSelection)
         self.tree.itemChanged.connect(self.on_item_changed)
         self.tree.itemDoubleClicked.connect(self.on_item_double_clicked)
+        self.tree.itemClicked.connect(self.on_tree_item_clicked)
 
         self.empty_state_widget = self._build_empty_state()
         self.midifi_notice_banner = self._build_midifi_notice_banner()
@@ -520,29 +542,49 @@ class MainWindow(QMainWindow):
                 ):
                     group_item.setText(COL_KS, midi_note_name(group.profile_item.keyswitch_note))
 
-                # Midi-fy toggle - realizes a trill into real
-                # alternating notes on demand, INSTANTLY (no rebuild
-                # warning, unlike the tremolo threshold - see
-                # core/midifi.py and Track.get_active_notes). Only
-                # shown for a genuine, single-track trill group -
-                # checked against the underlying Track's immutable
-                # .label (not group.name, which the user may have
-                # renamed) so detection never breaks from a rename.
-                # Hidden entirely (not just disabled) for anything
-                # else, same "empty cell reads clearer than a
-                # permanently-greyed control" convention already used
-                # for KS.
-                if not group.is_merged and "Trill" in group.tracks[0].label:
+                # Midi-fy toggle - INSTANT (no rebuild warning, unlike
+                # the tremolo threshold - see core/midifi.py and
+                # Track.get_active_notes). Only shown for a genuine,
+                # single-track group whose content this feature
+                # actually applies to - checked against the underlying
+                # Track's immutable .label (not group.name, which the
+                # user may have renamed) so detection never breaks
+                # from a rename. Hidden entirely (not just disabled)
+                # for anything else, same "empty cell reads clearer
+                # than a permanently-greyed control" convention
+                # already used for KS.
+                #
+                # Two content types share this one checkbox/handler,
+                # but need DIFFERENT tooltip wording - trill's off
+                # state is just "untouched," nothing to explain, while
+                # tremolo spanner's off state is ALSO a real
+                # transformation (collapse to one sustained note/chord
+                # for a dedicated patch), which the tooltip needs to
+                # actually say or the checkbox's default (unchecked)
+                # state would look like "does nothing" when it
+                # actually changes the export output either way.
+                label = group.tracks[0].label
+                is_trill = "Trill" in label
+                is_tremolo_spanner = "Tremolo-" in label
+
+                if not group.is_merged and (is_trill or is_tremolo_spanner):
                     track = group.tracks[0]
                     midifi_checkbox = QCheckBox()
                     midifi_checkbox.setFixedHeight(ROW_HEIGHT - 8)
                     midifi_checkbox.setChecked(track.midifi_toggle_active)
-                    midifi_checkbox.setToolTip(
-                        "Realize this trill into alternating notes "
-                        "(for libraries without a dedicated trill patch)"
-                    )
+                    if is_trill:
+                        midifi_checkbox.setToolTip(
+                            "Realize this trill into alternating notes "
+                            "(for libraries without a dedicated trill patch)"
+                        )
+                    else:
+                        midifi_checkbox.setToolTip(
+                            "On: alternate between the tremolo's two written "
+                            "sides. Off (default): one sustained note/chord "
+                            "for a dedicated tremolo/roll patch."
+                        )
                     midifi_checkbox.toggled.connect(
-                        lambda checked, t=track: self.on_trill_midifi_toggled(t, checked)
+                        lambda checked, t=track: self.on_midifi_toggled(t, checked)
                     )
                     midifi_wrapper = QWidget()
                     midifi_wrapper.setStyleSheet("background: transparent;")
@@ -604,20 +646,142 @@ class MainWindow(QMainWindow):
 
         # Detect a text/name edit (vs a checkbox toggle) by comparing
         # against the underlying session object's current name - both
-        # land in this same signal.
+        # land in this same signal. This is also the FULL story of
+        # what could have changed here (COL_NAME's data is only ever
+        # text or check-state) - so if it WASN'T a rename, it must
+        # have been a check-state toggle.
         new_text = item.text(COL_NAME)
-        if new_text != obj.name and new_text.strip():
+        is_rename = new_text != obj.name and new_text.strip()
+
+        if is_rename:
             obj.rename(new_text)
             self.statusBar().showMessage(f"Renamed to: {new_text}", 4000)
+        else:
+            # A genuine check-state toggle, not a rename - if this was
+            # triggered by clicking the tiny checkbox glyph directly,
+            # an itemClicked for the SAME click is about to fire right
+            # after this (verified directly: itemChanged fires BEFORE
+            # itemClicked for a glyph click) - flag it so
+            # on_tree_item_clicked knows not to ALSO toggle it again,
+            # which would otherwise make the glyph appear to do
+            # nothing (toggle, then immediately un-toggle).
+            #
+            # Deliberately NOT set for our OWN programmatic toggle (see
+            # _programmatic_toggle_in_progress) - no itemClicked is
+            # ever coming to consume it in that case, and setting it
+            # anyway would leave a stale guard that silently swallows
+            # the next real click on this row. Found this exact bug
+            # directly via testing, not theoretically - a second click
+            # on an already-toggled row was doing nothing at all.
+            if not self._programmatic_toggle_in_progress:
+                self._just_toggled_via_indicator = item
 
-        if item.checkState(COL_NAME) == Qt.CheckState.Checked:
+        checked = item.checkState(COL_NAME) == Qt.CheckState.Checked
+        if checked:
             if item not in self.check_order:
                 self.check_order.append(item)
         else:
             if item in self.check_order:
                 self.check_order.remove(item)
 
+        # Visual highlight mirrors check state directly - deliberately
+        # NOT using Qt's native row-selection mechanism for this (see
+        # design discussion): a background color driven purely by
+        # check state is simpler and can't drift out of sync with it,
+        # since there's only ever one source of truth.
+        highlight = QColor(COLORS["accent"]) if checked else QColor(COLORS["bg_content"])
+        text_color = QColor(COLORS["accent_text"]) if checked else QColor(COLORS["text"])
+        for col in (COL_NAME, COL_MERGED):
+            item.setBackground(col, highlight)
+            item.setForeground(col, text_color)
+
         self.update_action_states()
+
+    def _enforce_replace_selection(self, item):
+        """Uncheck every OTHER currently-checked row, leaving just
+        `item` checked - the "plain click replaces the selection" half
+        of standard multi-select semantics (Finder/Explorer-style):
+        clicking a row selects ONLY that row unless a modifier key is
+        held. Caller is responsible for ensuring `item` itself ends up
+        checked - this only clears everything ELSE.
+
+        Deliberately does NOT manage
+        self._programmatic_toggle_in_progress itself - the one caller
+        (on_tree_item_clicked) needs that flag held across BOTH this
+        call AND its own subsequent "ensure item is checked" step as
+        ONE single guarded block. Letting this method clear the flag
+        at its own end would incorrectly re-enable the glyph-click
+        guard partway through the caller's own still-in-progress
+        programmatic changes - the exact same stale-guard bug pattern
+        already found and fixed once before, reintroduced by having
+        two nested scopes fight over one shared flag.
+        """
+        for other in list(self.check_order):
+            if other is not item:
+                other.setCheckState(COL_NAME, Qt.CheckState.Unchecked)
+
+    def on_tree_item_clicked(self, item, column):
+        """Standard, familiar multi-select semantics (Finder/Explorer-
+        style), extended to work from ANYWHERE on a row (except
+        another embedded control like the Profile button, KS/Midi-fy
+        checkboxes, or Preview button), not just the tiny checkbox
+        glyph - with a real, deliberate distinction between the two
+        click targets, not one rule gated purely by modifier key:
+        - The checkbox glyph itself: ALWAYS purely additive (toggles
+          just this row, never touches anything else), REGARDLESS of
+          whether Cmd/Ctrl is held. This is the entire point of the
+          checkbox existing at all - a way to build a multi-selection
+          without needing to hold a modifier key. Making it ALSO
+          replace the selection sometimes would defeat that purpose.
+        - Anywhere else on the row (name text, the Merged column):
+          plain click replaces the selection (selects ONLY this row);
+          Cmd/Ctrl-click toggles just this row instead, same as the
+          glyph.
+
+        Applied synchronously/immediately, deliberately NOT debounced
+        - an earlier version delayed this by
+        `QApplication.doubleClickInterval()` specifically to stop a
+        double-click (rename/split) from ALSO toggling the checkbox on
+        its first click, but that delay made every ordinary click feel
+        noticeably laggy, for a problem that turns out to be harmless
+        either way: a double-click-to-rename also leaving that row
+        selected is a sensible outcome, not a confusing one, and a
+        double-click-to-split (COL_MERGED) triggers a full
+        refresh_tree() rebuild anyway, which wipes any selection
+        regardless of what happened on the first click.
+
+        One thing this STILL has to guard against, verified directly
+        rather than assumed: itemClicked ALSO fires for a click that
+        landed squarely on the checkbox glyph itself, AFTER Qt's own
+        native handling already toggled it - naively toggling again
+        here would cancel that back out. Guarded via
+        self._just_toggled_via_indicator, set by on_item_changed.
+        """
+        if self._just_toggled_via_indicator is item:
+            self._just_toggled_via_indicator = None
+            return  # glyph click already toggled natively - always additive, nothing more to do
+
+        if column not in (COL_NAME, COL_MERGED):
+            return  # an embedded-widget column - let it handle its own click
+
+        if not (item.flags() & Qt.ItemFlag.ItemIsUserCheckable):
+            return
+
+        modifiers = QApplication.keyboardModifiers()
+        additive = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+
+        self._programmatic_toggle_in_progress = True
+        if additive:
+            current = item.checkState(COL_NAME)
+            new_state = (
+                Qt.CheckState.Unchecked if current == Qt.CheckState.Checked else Qt.CheckState.Checked
+            )
+            item.setCheckState(COL_NAME, new_state)
+        else:
+            self._enforce_replace_selection(item)
+            if item.checkState(COL_NAME) != Qt.CheckState.Checked:
+                item.setCheckState(COL_NAME, Qt.CheckState.Checked)
+        self._programmatic_toggle_in_progress = False
 
     def on_item_double_clicked(self, item, column):
         # Double-clicking the "M" column splits a merged row back
@@ -1167,15 +1331,23 @@ class MainWindow(QMainWindow):
         # trigger a rebuild.
         self.refresh_tree()
 
-    def on_trill_midifi_toggled(self, track, checked):
+    def on_midifi_toggled(self, track, checked):
         """Instant - just flips the flag and redraws the tree, no
         rebuild-from-source warning. This is exactly the point of the
-        non-destructive architecture built in step 2 - Track.notes
-        (the original) is never touched, so there's nothing to warn
-        about losing. refresh_tree() here is a cheap UI-only redraw
-        (walking the already-in-memory Session), not a re-parse - the
-        same cost as any other tree refresh in this app, not the
-        "rebuild from source" tremolo's threshold change triggers.
+        non-destructive architecture built for trill, later
+        generalized for tremolo spanner - Track.notes (the original)
+        is never touched, so there's nothing to warn about losing.
+        refresh_tree() here is a cheap UI-only redraw (walking the
+        already-in-memory Session), not a re-parse - the same cost as
+        any other tree refresh in this app, not the "rebuild from
+        source" tremolo's THRESHOLD change triggers (a different,
+        unrelated setting - single-note tremolo, not this spanner
+        toggle).
+
+        Shared across every midi-fy-toggleable content type (trill,
+        tremolo spanner) - what happens on toggle is generic (flip the
+        flag), it's Track.get_active_notes() that knows how to
+        interpret the flag differently per content type.
         """
         track.midifi_toggle_active = checked
         self.refresh_tree()
