@@ -28,6 +28,8 @@ elsewhere, not a new one.
 
 import copy
 
+from music21 import converter
+
 MIDIFI_SOURCE_LABEL_PREFIX = "Midifi"
 
 
@@ -46,21 +48,113 @@ class MidifiConfig:
         # stays "unmeasured" (untouched - exported as a plain
         # sustained note for a dedicated tremolo patch) rather than
         # being realized into literal discrete repeated notes.
-        # Default 1 (the lowest real flag count a tremolo can have)
-        # means EVERY tremolo counts as unmeasured - i.e. midi-fy has
-        # NO effect until the user explicitly raises this,
-        # deliberately matching "identical to current behavior" as
-        # the default rather than needing a separate on/off flag.
-        self.tremolo_min_unmeasured_flags = 1
+        # Default 3, matching real notational convention (1-2 flags
+        # conventionally means precise rhythmic subdivision, 3+
+        # conventionally means "as fast as possible"/buzz effect) -
+        # still fully user-adjustable per session, since the right
+        # threshold genuinely depends on the piece (a slow adagio can
+        # legitimately want even a 3-flag tremolo treated as measured
+        # instead).
+        self.tremolo_min_unmeasured_flags = 3
+
+        # Trill alternation rate, expressed as notes-per-quarter-note
+        # (a TEMPO-RELATIVE subdivision, not an absolute Hz value) -
+        # matches how trills are actually notated, an ornament
+        # relative to the beat, so this stays musically correct across
+        # tempo changes within a piece rather than needing to. Default
+        # 8 = a 32nd-note-rate alternation, a reasonable general-
+        # purpose starting point - real rate/shape/curve controls are
+        # still being designed (see BACKLOG.md), this is deliberately
+        # just the one parameter being tackled first.
+        self.trill_notes_per_quarter = 8
 
     def to_dict(self):
-        return {"tremolo_min_unmeasured_flags": self.tremolo_min_unmeasured_flags}
+        return {
+            "tremolo_min_unmeasured_flags": self.tremolo_min_unmeasured_flags,
+            "trill_notes_per_quarter": self.trill_notes_per_quarter,
+        }
 
     @classmethod
     def from_dict(cls, data):
         config = cls()
+        # Fallback of 1 here is DELIBERATELY different from the
+        # constructor's own default (3) - this path is specifically
+        # for loading an OLD saved session that predates this feature
+        # entirely (no "midifi_config" key at all), and such a session
+        # genuinely had NO midi-fy applied when it was saved. Falling
+        # back to 3 here would silently start realizing tremolo in a
+        # file that never had that happen, the first time it's
+        # reopened - falling back to 1 (the true "nothing happens"
+        # value) correctly reconstructs the same state the session
+        # actually had.
         config.tremolo_min_unmeasured_flags = data.get("tremolo_min_unmeasured_flags", 1)
+        # Trill rate does NOT need the same deliberately-different-
+        # fallback treatment tremolo needed above: trill realization
+        # is toggled per-note, on demand (see the non-destructive
+        # architecture design in BACKLOG.md) - an old session has no
+        # trills toggled on regardless of what rate value is present,
+        # so there's no "silently changes already-reconstructed note
+        # data" risk the way tremolo's session-wide, always-applied
+        # threshold has. Safe to just fall back to the same default
+        # the constructor uses.
+        config.trill_notes_per_quarter = data.get(
+            "trill_notes_per_quarter", cls().trill_notes_per_quarter
+        )
         return config
+
+
+def realize_trill_notes(main_pitch_midi, upper_pitch_midi, total_duration, notes_per_quarter):
+    """PURE function - no music21 stream/context dependency at all,
+    deliberately, so it can be reused later for on-demand realization
+    (compute fresh each time a trill's toggle is switched on, rather
+    than baked in once at parse time - see the non-destructive
+    architecture design in BACKLOG.md) without needing to worry about
+    whether the originating note is still attached to its original
+    stream.
+
+    Given a trill's main pitch and upper-auxiliary pitch (as plain
+    MIDI note numbers, not music21 Pitch objects - keeps this function
+    free of any music21 dependency at all), the total duration to
+    fill (in quarterLength), and a rate (alternating notes per quarter
+    note - a TEMPO-RELATIVE subdivision, not an absolute Hz value, so
+    the same rate value stays musically correct regardless of the
+    piece's actual tempo), returns a list of (pitch_midi, offset,
+    duration) tuples for the alternating trill notes.
+
+    Alternation starts on the MAIN pitch, not the upper auxiliary -
+    the modern/common performance-practice convention. (Some
+    historical/baroque convention starts on the upper note instead;
+    picked the modern convention as the MVP default since it's more
+    common in general practice, not because the alternative is wrong -
+    flagged as adjustable if this doesn't match what's actually
+    wanted once heard.)
+
+    Duration-fit: evenly divides total_duration across however many
+    notes the rate implies (rounded to a whole number, minimum 2 so an
+    actual alternation occurs), rather than hitting the target rate
+    exactly and leaving a leftover fractional gap. Mirrors tremolo's
+    already-proven approach (evenly dividing duration, not leaving
+    remainders) - picked as the simpler, more robust MVP default for
+    a question BACKLOG.md flagged as still genuinely open: this makes
+    note count and total duration always exact, at the cost of the
+    ACTUAL rate being slightly approximate depending on how evenly the
+    target count divides the total duration.
+    """
+    if total_duration <= 0 or notes_per_quarter <= 0:
+        return []
+
+    target_count = round(total_duration * notes_per_quarter)
+    note_count = max(2, target_count)
+
+    each_duration = total_duration / note_count
+
+    result = []
+    for i in range(note_count):
+        pitch = main_pitch_midi if i % 2 == 0 else upper_pitch_midi
+        offset = i * each_duration
+        result.append((pitch, offset, each_duration))
+
+    return result
 
 
 def resolve_tremolo_midifi(part, config):
@@ -151,3 +245,36 @@ def resolve_tremolo_midifi(part, config):
         n.expressions = [e for e in n.expressions if e.__class__.__name__ != "Tremolo"]
         n.mididivisi_midifi_source = "tremolo"
         n.duration.quarterLength = each_duration
+
+
+def detect_midifiable_content(file_path):
+    """Scan a MusicXML file for content that midi-fy could apply to,
+    entirely independent of any midi-fy config or processing - a
+    lightweight pre-check used for the "this score has tremolo, check
+    Midi-fy" notice shown on import, not a processing decision itself.
+
+    Does its OWN minimal parse (convert to sounding pitch only, no
+    harmonics/divisi/midifi resolution) rather than reusing
+    load_score() - deliberately, to count RAW, unprocessed tremolo
+    markings before any realization could have already split one
+    original event into several notes. Counting on an
+    already-processed score would either over-count (a single
+    tremolo split into 8 realized notes looking like 8 "hits") or
+    under-count depending on what the active config already decided,
+    neither of which is what this notice needs - it just needs to
+    know whether the score has tremolo content at all.
+
+    Returns {"tremolo": count} - extensible for future midi-fy feature
+    types (e.g. "glissando") without needing to redesign this
+    function's shape. Empty dict if nothing found.
+    """
+    score = converter.parse(file_path)
+    score = score.toSoundingPitch()
+
+    counts = {"tremolo": 0}
+    for part in score.parts:
+        for n in part.flatten().notes:
+            if n.isNote and any(e.__class__.__name__ == "Tremolo" for e in n.expressions):
+                counts["tremolo"] += 1
+
+    return {k: v for k, v in counts.items() if v > 0}

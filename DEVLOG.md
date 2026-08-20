@@ -1118,3 +1118,258 @@ structure keyed by stable natural keys and re-parses the embedded
 original score fresh on load, reconstructing the exact saved
 Instrument/Group shape directly against the freshly-parsed
 tracks/identities.
+
+## Trills - basic oscillation, DONE
+
+Built in 4 deliberate steps (given the size and the real risk of
+losing session budget mid-work, which had already happened once
+earlier this session via a full environment reset) - each step fully
+tested and delivered before the next began: (1) pure realization
+logic; (2) the non-destructive on-demand toggle architecture; (3) the
+tree UI toggle; (4) rate config in the Midi-fy window.
+
+  **Step 1.** `core/midifi.py` gained `realize_trill_notes()`,
+  a genuinely pure function (no music21/stream dependency at all,
+  deliberately - operates on plain MIDI note numbers) that alternates
+  between a main and upper-auxiliary pitch, evenly dividing a given
+  duration into as many notes as the rate implies (minimum 2). Rate
+  is `MidifiConfig.trill_notes_per_quarter` (default 8 = 32nd-note-
+  rate alternation), added following the exact same
+  session-persistence pattern already proven for the tremolo
+  threshold, including a deliberately-considered fallback difference
+  in `from_dict` (tremolo's old-session fallback had to differ from
+  its live default to avoid silently changing already-baked note
+  data; trill's fallback safely matches its default instead, since
+  trill realization will be toggled per-note on demand rather than
+  applied automatically to a whole session on load).
+
+  `parser.py` gained a small refactor alongside this: the trill-
+  interval-detection logic that already existed (for the "Trill-M2"/
+  "Trill-m2" tree label) was extracted into a reusable
+  `get_trill_interval()` helper, used by both the existing labeling
+  code and the new realization work, rather than duplicating the
+  logic. Verified this refactor is behaviorally identical via a full
+  regression pass before building anything on top of it.
+
+  Verified thoroughly, not just via synthetic inputs: basic
+  alternation and exact duration-fit, note count correctly scaling
+  with duration, the minimum-2-notes floor holding even for very
+  short durations, zero/negative inputs failing safely instead of
+  crashing, no gaps or overlaps anywhere in a generated sequence -
+  AND the full real-data chain end to end (found the actual trill in
+  `String_Test_Piece.musicxml`, correctly detected its interval,
+  correctly transposed the upper pitch, correctly realized 32 notes
+  filling its exact original duration).
+
+  Decisions made along the way, previously flagged as open,
+  now settled for the MVP (both explicitly adjustable later, not
+  irreversible):
+  - Alternation starts on the MAIN pitch, not the upper auxiliary -
+    the modern/common convention, not the alternative historical/
+    baroque one.
+  - Duration-fit: evenly divide across a rounded note count (mirrors
+    tremolo's proven approach) rather than hit the exact rate and
+    leave a leftover fractional gap - resolves the question BACKLOG.md
+    had previously flagged as genuinely undecided.
+
+  **Step 2.** The actual non-destructive toggle mechanism.
+  `Track` gained `midifi_toggle_active` (default False, per-track) and
+  `get_active_notes(midifi_config)` - returns `self.notes` (the
+  literal original list, not even a copy) when the toggle is off, or
+  a freshly-computed realization when it's on. `self.notes` itself is
+  NEVER mutated by any of this - confirmed directly (the original
+  note's Trill expression and duration were both still intact after
+  toggling on and reading the realized output). Computed fresh on
+  every call rather than cached, deliberately - trill realization is
+  cheap, and this sidesteps any stale-cache risk if the rate config
+  changes later while a toggle is active.
+
+  The actual wiring (`realize_track_trills`, in `session.py` rather
+  than `core/midifi.py`) turned out to need a real architectural
+  choice: `parser.py` already imports from `midifi.py`, so `midifi.py`
+  importing `get_trill_interval` back from `parser.py` would have
+  been a circular import. Resolved by keeping `midifi.py` as pure
+  computation with zero `parser.py` dependency, and putting the
+  "wire the pure logic to real track data" concern in `session.py`
+  instead, which already legitimately depends on both.
+
+  Verified before relying on it: a note held by a `Track`, well after
+  the original parsed `Score` object is released and garbage
+  collected, still correctly resolves its trill interval via live key-
+  signature context lookup (confirmed directly, not assumed) - so no
+  parse-time pre-computation/caching of the interval was needed, on-
+  demand computation works correctly as-is.
+
+  `Group.get_combined_notes()` and the export pipeline
+  (`exporter.py`) were threaded through to accept and pass
+  `midifi_config` (3 real call sites, all in `exporter.py`) - verified
+  the full chain end to end: toggle on → real alternating notes appear
+  in actual exported MIDI; toggle off → instantly back to the
+  original single note, no re-parse. Session save/load also updated -
+  each track's toggle state is now genuinely persisted (a real user
+  choice about export output, same as any other setting) - the
+  serialization format changed from a flat per-group key list to
+  per-track dicts, with backward compatibility verified directly
+  against a hand-constructed old-format file (loads correctly,
+  defaults every track's toggle to off, exactly as an old session
+  that never had this feature should).
+
+  **One real, pre-existing, UNRELATED discrepancy found and correctly
+  ruled out during testing, not chased down further**: a naive
+  regression check comparing note/chord OBJECT counts (293 for
+  `String_Test_Piece.musicxml`) against actual exported MIDI
+  `note_on` EVENT counts (311) revealed a gap - but that comparison
+  was never valid to begin with once chords are involved (one Chord
+  object legitimately produces multiple `note_on` events). Confirmed
+  directly that this exact same gap exists via the pre-step-2-
+  equivalent code path too (calling `get_combined_notes()` with no
+  `midifi_config` at all), proving it's unrelated to this work.
+  Checked one candidate explanation (duplicate pitches within a
+  chord) and ruled it out too - genuinely unexplained, but confirmed
+  pre-existing and out of scope for trills. Worth a dedicated look
+  sometime, logged separately below rather than left silently
+  unmentioned.
+
+  **Step 3.** The actual tree UI toggle. New "Midi-fy" tree
+  column (a plain checkbox, no label text - the column header already
+  provides context, kept compact matching the narrow Preview column's
+  precedent). Shown ONLY for a genuine, single-track trill group -
+  checked against the underlying `Track.label` (permanent/immutable),
+  not `group.name` (which the user may have renamed), so detection
+  never breaks from a rename. Hidden entirely - not just disabled -
+  for merged groups, non-trill groups, and instrument rows, same
+  "empty cell reads clearer than a permanently-greyed control"
+  convention already used for KS.
+
+  Toggling calls the exact same `refresh_tree()` every other toggle in
+  this app already uses - genuinely instant, confirmed directly (not
+  assumed): checked that `self.session` is the literal same object
+  before and after toggling, proving no rebuild-from-source ever
+  happens, unlike tremolo's threshold change.
+
+  Verified the complete chain through the REAL UI, not just the data
+  layer this time: clicking the actual checkbox in the actual tree →
+  `Track.midifi_toggle_active` correctly updates → the checkbox
+  correctly re-reflects its own state after the refresh → real MIDI
+  export correctly reflects 32 realized notes when checked and
+  reverts to the original 1 note when unchecked - toggled both
+  directions through the real widget, not just set the flag directly.
+  Full regression across all three real files confirmed unaffected.
+
+  **Step 4.** Rate configuration in the Midi-fy window. Added a real
+  design decision along the way, not just a UI addition: tremolo's
+  threshold and trill's rate can't share one uniform Apply behavior,
+  because they aren't the same KIND of setting mechanically - tremolo
+  realization is destructive/parse-time (needs a full rebuild to
+  change), trill realization is computed fresh on demand every call
+  (built specifically in step 2 to avoid needing one). Forcing trill
+  rate changes through the same rebuild-and-warn flow tremolo needs
+  would have quietly defeated the entire point of that architecture.
+
+  Resolved by having `MidifiDialog._apply()` compare old vs. new
+  values itself and expose `.requires_rebuild` for the caller to
+  branch on, rather than the caller needing to know the difference:
+  only shows the "this will rebuild your session" warning when the
+  TREMOLO threshold specifically changed; a trill-rate-only change
+  applies instantly with no warning at all.
+
+  Verified all of this directly through the real UI, not assumed from
+  the design: a trill-rate-only change showed no warning dialog and
+  left `self.session` as the literal same object (proving no rebuild
+  happened); a tremolo threshold change still correctly showed the
+  warning and produced a genuinely new session object; cancelling the
+  warning correctly aborted with zero side effects on either setting.
+
+  Also verified the actual payoff this whole 4-step architecture was
+  built for, not just each piece in isolation: toggled a trill on at
+  the default rate (32 notes), changed the rate via the dialog with
+  NO re-toggling, and confirmed the SAME already-toggled trill
+  automatically produced 64 notes on the next export - the rate
+  change propagated with zero additional user action, exactly as
+  step 2's "compute fresh on demand, never cache" design was meant to
+  enable. Also confirmed the dialog correctly pre-fills the CURRENT
+  session's live values when reopened, not stale defaults.
+
+  Original design context (UI shape, why the non-destructive
+  architecture is needed for steps 2-3, the still-open velocity-
+  timing question, the classification/defaults design for later):
+  - **UI**: a toggle per trill-labeled row in the tree is the primary
+    action (not a toolbar-select-then-click flow, and not buried only
+    in a dialog) - trill decisions are usually made per-instrument
+    based on what patch is actually available, so bulk-apply doesn't
+    buy much. The toggle must feel INSTANT - no rebuild-from-source
+    warning, unlike tremolo.
+  - **This forces a real architectural change, decided to build for
+    trills first, retrofit tremolo later, NOT simultaneously.**
+    Tremolo's current realization is a destructive parse-time
+    rewrite - the original note is mutated in place and the tremolo
+    tag is stripped, so there is nothing left in memory to undo from;
+    that's WHY tremolo's toggle currently requires a full rebuild
+    warning. An instant toggle needs the opposite: keep the original,
+    un-midified notes intact somewhere, and treat "midified" as
+    something computed fresh on demand and swapped in/out per track,
+    never destroying the source data. This mechanism doesn't exist
+    yet anywhere in the codebase. Building it for trills (nothing to
+    break yet) and only later retrofitting tremolo onto the same
+    pattern, once it's proven, rather than migrating a working feature
+    and building brand-new infrastructure in the same pass.
+    - **Real open technical question this raises**: WHEN does
+      velocity/dynamics get applied to a note that's realized
+      on-demand rather than once at parse time? Tremolo's dynamics
+      pass currently runs once, after all notes (including realized
+      ones) exist. Needs an actual answer once this mechanism is
+      designed, not just "reuse tremolo's pipeline as-is."
+  - **Speed/rate representation: tempo-relative subdivision, not
+    absolute Hz** - matches how trills are actually notated (an
+    ornament relative to the beat, not a fixed oscillation rate), and
+    stays musically correct across tempo changes within a piece.
+  - **Still undecided, needs a real answer before more settings layer
+    on top**: how the trill's note count interacts with its host
+    note's duration - evenly divide the duration with rate as a
+    target/average (always fits exactly, rate is approximate), vs.
+    hit the exact rate and accept a leftover fractional gap at the
+    end of the note. Small decision now, real headache to change once
+    curves/humanize depend on the timing model.
+  - **MVP scope, decided**: linear speed only, no humanizer, velocity
+    taken directly from the dynamic marking (no accent/tenuto layering
+    yet - flagged as a real future refinement, not now). Rate/shape/
+    curve/velocity-shape/humanizer are all meant to become real
+    settings eventually, but only rate is being tackled first - the
+    generation function should still take these as real parameters
+    with hardcoded defaults now, rather than baking "linear, no
+    humanize" into the logic itself, so the future settings work is
+    wiring, not restructuring.
+  - **Where rate/shape/curve config lives: the Midi-fy window,
+    PER-PROJECT, not global Settings.** Once tempo-relative
+    subdivision was decided, this stopped being a preference and
+    became a musical decision about the specific piece - the same
+    reasoning already applied to glissando/legato's Profile-scoping
+    above.
+  - **Instrument classification (oscillation vs. tremolo-style trill,
+    e.g. timpani) is explicitly a SEPARATE later step, after basic
+    oscillation trills work** - deliberately sequenced this way.
+    Design already agreed for when it's built:
+    - Lives in the Midi-fy window too (per-project, editable per
+      instrument) - explicitly rejected having it live in Settings
+      alongside global defaults, since two places showing "the same
+      setting" (one affecting this project, one only affecting future
+      projects' starting point) would be genuinely confusing, not
+      just redundant.
+    - A dedicated "Edit Defaults" button opens the GLOBAL default
+      classifications (used to seed new projects) - editing there
+      never touches the current project's live settings, and vice
+      versa.
+    - "Restore Defaults" resets the CURRENT project's classifications
+      back to whatever the current global defaults are. Scope: whole-
+      project first (decided); per-instrument restore is wanted too,
+      but later.
+    - A reverse action - "promote this project's current
+      classifications to be my new defaults going forward" - agreed
+      as worth adding, not yet designed further.
+    - Global defaults need a real starting value per instrument type
+      (even if wrong/unrefined) rather than any "empty/unset" state -
+      deliberately fine to get this wrong initially and tune later,
+      just not leave it blank.
+    - Treating a trill as a tremolo (timpani-style) is NOT a separate
+      mechanism - it's just one of the two values this same
+      classification setting can take.

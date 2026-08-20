@@ -86,7 +86,24 @@ def _serialize_session(session):
                 {
                     "name": group.name,
                     "included": group.included,
-                    "track_keys": [list(t.natural_key) for t in group.tracks],
+                    # Per-track data, not just a flat key list - each
+                    # track now also carries its own midi-fy toggle
+                    # state (see Track.midifi_toggle_active), which is
+                    # a genuine user choice about export output and
+                    # needs to survive save/load, same as any other
+                    # setting. Old session files (pre-dating this)
+                    # only have the flat "track_keys" list - handled
+                    # on load by falling back to
+                    # midifi_toggle_active=False for those, since an
+                    # old session never had a trill toggled on in the
+                    # first place.
+                    "tracks": [
+                        {
+                            "natural_key": list(t.natural_key),
+                            "midifi_toggle_active": t.midifi_toggle_active,
+                        }
+                        for t in group.tracks
+                    ],
                     # Which InventoryItem (from the instrument's
                     # assigned Profile, if any) this group corresponds
                     # to - by id, not embedded data, since Profiles are
@@ -257,12 +274,26 @@ def finish_loading_session(load_result, use_saved_settings):
         groups = []
         for group_data in instr_data["groups"]:
             tracks = []
-            for key in group_data["track_keys"]:
-                key_t = tuple(key)
+            # "tracks" is the current format (per-track dicts,
+            # including midifi_toggle_active). Falls back to the OLD
+            # flat "track_keys" list for a session saved before this
+            # existed - such a session never had a trill toggled on,
+            # so midifi_toggle_active correctly defaults to False for
+            # every track resolved that way.
+            track_entries = group_data.get("tracks")
+            if track_entries is None:
+                track_entries = [
+                    {"natural_key": key, "midifi_toggle_active": False}
+                    for key in group_data.get("track_keys", [])
+                ]
+
+            for entry in track_entries:
+                key_t = tuple(entry["natural_key"])
                 track = tracks_by_key.get(key_t)
                 if track is None:
                     warnings.append(f"Track {key_t} no longer found in the score - skipped")
                     continue
+                track.midifi_toggle_active = entry.get("midifi_toggle_active", False)
                 tracks.append(track)
 
             if not tracks:

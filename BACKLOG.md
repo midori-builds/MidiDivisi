@@ -16,9 +16,12 @@ fleshed out, not starting from scratch).
 
 Also actively being designed: **midi-fy** (`core/midifi.py`) is the
 shared foundation for turning notated techniques into real MIDI
-events. Tremolo is built; several more techniques are meant to reuse
-the same framework - see "Midi-fy features not yet built" below.
-Trills are the next thing under discussion.
+events. Tremolo is built; trills are next and already have real design
+substance decided (see "Midi-fy features not yet built" below for the
+full detail - UI shape, the instant-toggle architecture change it
+requires, speed representation, and the classification-defaults
+design), with basic oscillation trills as the actual next thing to
+build.
 
 ## Auto Condensing / Score Condensing
 
@@ -63,9 +66,30 @@ DEVLOG.md for the full reasoning behind each decision below).
 Tremolo (single-note) is done. These are meant to reuse the same
 `core/midifi.py` foundation (`MidifiConfig`, the "rebuild from source"
 strategy, session-level persistence) rather than build parallel
-one-off systems:
+one-off systems - though trills are already revealing that different
+midi-fy features want genuinely different CONFIG SCOPES (tremolo's
+threshold is session-wide; trill classification is per-instrument;
+glissando/legato look like they'll want per-profile) - worth staying
+alert to that rather than forcing everything into tremolo's shape.
 
-- **Trills** - up next (currently under discussion).
+- **Trills (basic oscillation) - DONE.** Toggle per trill-labeled row
+  in the tree, instant on/off (no session rebuild - realization is
+  computed fresh on demand, never baked in destructively), rate
+  configurable per-project in the Midi-fy window. Full implementation
+  history and verification detail in DEVLOG.md.
+  **Still deferred, exactly as originally scoped** ("something to add
+  after basic trills" - not a gap, a deliberate sequencing decision):
+  - Instrument classification (oscillation vs. tremolo-style, e.g.
+    timpani) - lives in the Midi-fy window per-project, with a
+    separate global-defaults editor + restore-to-defaults action. Full
+    design already agreed (see DEVLOG.md), just not built yet.
+  - Speed shape beyond linear (curves, custom), velocity shape, and a
+    humanizer - all deliberately hardcoded/off for the MVP, but the
+    generation function already takes them as real parameters with
+    hardcoded defaults, so this should be wiring, not restructuring,
+    when it's tackled.
+  - Velocity currently comes straight from the dynamic marking only -
+    not yet layering in accent/tenuto/other per-note articulations.
 - **Arpeggio** - a chord marked `<arpeggiate>`. No sample library has
   an "arpeggio patch" - needs to become real staggered note-on events.
   Direction-aware (up/down/non-arpeggio) data is already retrievable
@@ -192,6 +216,20 @@ Verovio, zoom/fit, working text labels) is done. Not yet built:
 
 ## Known parsing/data gaps
 
+- **Exported `note_on` count doesn't match parsed note/chord object
+  count, gap unexplained** - found while testing the trill toggle
+  mechanism (see "Midi-fy features not yet built" above), confirmed
+  unrelated to that work specifically (the same gap exists via the
+  pre-existing code path too, not something the toggle introduced).
+  For `String_Test_Piece.musicxml`: 293 parsed note/chord objects,
+  but 311 actual `note_on` events in the exported MIDI. Some of that
+  gap is expected and not a bug (a single Chord object legitimately
+  produces multiple `note_on` events, one per pitch), but a full
+  pitch-level count came to 318, not 311 - a 7-note gap still
+  unaccounted for. Checked one candidate explanation (duplicate
+  pitches within a single chord) and ruled it out directly. Not
+  chased down further since it was out of scope for what was being
+  tested - worth a dedicated look on its own.
 - Unpitched percussion is not parsed at all - `Unpitched` objects
   aren't `Note`/`Chord`, silently skipped. Needs its own detection
   path (no pitch, only instrument/sound identity) - no plan yet.

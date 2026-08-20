@@ -183,7 +183,7 @@ def export_score_to_midi_per_instrument(score, output_dir):
     return written_paths
 
 
-def _flatten_instrument_with_keyswitches(instr):
+def _flatten_instrument_with_keyswitches(instr, midifi_config):
     """Combine an instrument's INCLUDED, MATCHED groups (those with a
     real profile_item) into ONE time-ordered list of notes, with a
     keyswitch note-on inserted whenever the active articulation bucket
@@ -210,7 +210,7 @@ def _flatten_instrument_with_keyswitches(instr):
             continue
         if group.profile_item is None:
             continue  # exported as its own separate track instead - see above
-        for n in group.get_combined_notes():
+        for n in group.get_combined_notes(midifi_config):
             timeline.append((n.offset, group, n))
 
     timeline.sort(key=lambda entry: entry[0])
@@ -233,7 +233,7 @@ def _flatten_instrument_with_keyswitches(instr):
     return result_notes
 
 
-def _build_instrument_export_tracks(instr):
+def _build_instrument_export_tracks(instr, midifi_config):
     """Decide, for one Instrument, whether it exports as one flattened
     keyswitch track or as separate tracks per group (today's default
     behavior) - shared by both export_session_to_midi and
@@ -256,19 +256,19 @@ def _build_instrument_export_tracks(instr):
     )
 
     if not keyswitching_active:
-        tracks = [(g.name, g.get_combined_notes()) for g in instr.groups if g.included]
+        tracks = [(g.name, g.get_combined_notes(midifi_config)) for g in instr.groups if g.included]
         return [(name, notes) for name, notes in tracks if notes]
 
     result = []
 
-    flattened_notes = _flatten_instrument_with_keyswitches(instr)
+    flattened_notes = _flatten_instrument_with_keyswitches(instr, midifi_config)
     if flattened_notes:
         result.append((instr.name, flattened_notes))
 
     for group in instr.groups:
         if not group.included or group.profile_item is not None:
             continue
-        notes = group.get_combined_notes()
+        notes = group.get_combined_notes(midifi_config)
         if notes:
             result.append((group.name, notes))
 
@@ -294,7 +294,7 @@ def export_session_to_midi(session, output_path):
     for instr in session.instruments:
         if not instr.included:
             continue
-        for track_name, notes in _build_instrument_export_tracks(instr):
+        for track_name, notes in _build_instrument_export_tracks(instr, session.midifi_config):
             out_score.insert(0, _build_midi_track(track_name, notes))
 
     out_score.write("midi", fp=output_path)
@@ -324,7 +324,7 @@ def export_session_to_midi_per_instrument(session, output_dir):
         if not instr.included:
             continue
 
-        tracks_with_notes = _build_instrument_export_tracks(instr)
+        tracks_with_notes = _build_instrument_export_tracks(instr, session.midifi_config)
 
         if not tracks_with_notes:
             continue  # nothing included/with notes for this instrument

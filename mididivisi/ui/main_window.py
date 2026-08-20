@@ -41,11 +41,13 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QPushButton,
     QCheckBox,
+    QLabel,
 )
 
 from mididivisi.core.parser import load_score
 from mididivisi.core.session import Session
 from mididivisi.core import session_file
+from mididivisi.core.midifi import detect_midifiable_content
 from mididivisi.ui.export_dialog import ExportDialog
 from mididivisi.ui.settings_dialog import SettingsDialog
 from mididivisi.ui.profile_manager import ProfileManagerWindow
@@ -53,6 +55,7 @@ from mididivisi.ui.notation_preview_window import NotationPreviewWindow
 from mididivisi.ui.midifi_dialog import MidifiDialog
 from mididivisi.ui.profile_picker_dialog import ProfilePickerDialog
 from mididivisi.core.profiles import midi_note_name
+from mididivisi.ui.theme import COLORS
 
 # Tree column indices
 COL_NAME = 0
@@ -60,6 +63,7 @@ COL_MERGED = 1
 COL_PROFILE = 2
 COL_KS = 3
 COL_PREVIEW = 4
+COL_MIDIFI = 5
 
 # Explicit fixed row height - see the matching comment in
 # export_dialog.py for why this is needed (Qt/QSS row-height drift on
@@ -227,12 +231,81 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.export_action)
         toolbar.addAction(self.settings_action)
 
+    def _build_midifi_notice_banner(self):
+        """A dismissible, non-blocking notice shown after import if
+        the score has content midi-fy could apply to (currently just
+        tremolo) - the user might have no idea this feature exists,
+        but a modal popup felt too intrusive for something that
+        shouldn't take away the choice of WHEN to engage with it (per
+        design discussion). Reuses the theme's own accent color for
+        consistency rather than inventing a new one.
+        """
+        banner = QWidget()
+        banner.setStyleSheet(
+            f"background: {COLORS['accent']}; color: {COLORS['accent_text']};"
+        )
+        layout = QHBoxLayout(banner)
+        layout.setContentsMargins(12, 8, 12, 8)
+
+        self.midifi_notice_label = QLabel("")
+        self.midifi_notice_label.setWordWrap(True)
+        self.midifi_notice_label.setStyleSheet(f"color: {COLORS['accent_text']};")
+        layout.addWidget(self.midifi_notice_label, 1)
+
+        open_button = QPushButton("Open Midi-fy")
+        open_button.clicked.connect(self._on_midifi_notice_open_clicked)
+        layout.addWidget(open_button)
+
+        dismiss_button = QPushButton("Dismiss")
+        dismiss_button.clicked.connect(self._dismiss_midifi_notice)
+        layout.addWidget(dismiss_button)
+
+        banner.setVisible(False)
+        return banner
+
+    def _on_midifi_notice_open_clicked(self):
+        self.midifi_notice_banner.setVisible(False)
+        self.open_midifi_dialog()
+
+    def _dismiss_midifi_notice(self):
+        self.midifi_notice_banner.setVisible(False)
+
+    def _check_midifi_notice(self, file_path):
+        """Called right after a fresh MusicXML import - shows the
+        banner if the score has midi-fiable content, using a
+        lightweight independent detection pass (see
+        midifi.detect_midifiable_content) rather than inspecting the
+        already-loaded session, which would either over- or under-
+        count depending on what the active config already did to the
+        notes. Per-import, not a permanent one-time-ever notice - re-
+        shows on the next import if relevant again, doesn't nag
+        further within the same session once dismissed.
+        """
+        try:
+            detected = detect_midifiable_content(file_path)
+        except Exception:
+            return  # detection failing shouldn't block a successful import
+
+        if not detected:
+            self.midifi_notice_banner.setVisible(False)
+            return
+
+        tremolo_count = detected.get("tremolo", 0)
+        if tremolo_count:
+            noun = "passage" if tremolo_count == 1 else "passages"
+            self.midifi_notice_label.setText(
+                f"This score has {tremolo_count} tremolo {noun} that Midi-fy can turn "
+                f"into real notes for libraries without a tremolo patch."
+            )
+            self.midifi_notice_banner.setVisible(True)
+
     def _build_tree(self):
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Track", "Merged", "Profile", "KS", "Preview"])
+        self.tree.setHeaderLabels(["Track", "Merged", "Profile", "KS", "Preview", "Midi-fy"])
         self.tree.setColumnWidth(COL_NAME, 450)
         self.tree.setColumnWidth(COL_PROFILE, 170)
         self.tree.setColumnWidth(COL_PREVIEW, 40)
+        self.tree.setColumnWidth(COL_MIDIFI, 55)
         # Checkboxes are the selection mechanism here, not native row
         # highlighting - disable native selection so the two don't
         # visually compete with each other.
@@ -241,13 +314,23 @@ class MainWindow(QMainWindow):
         self.tree.itemDoubleClicked.connect(self.on_item_double_clicked)
 
         self.empty_state_widget = self._build_empty_state()
+        self.midifi_notice_banner = self._build_midifi_notice_banner()
 
         # Central widget swaps between the empty-state canvas (two big
-        # Open/Import buttons) and the tree, rather than the tree
-        # always being visible even with nothing loaded.
+        # Open/Import buttons) and the tree (now wrapped with the
+        # notice banner above it), rather than the tree always being
+        # visible even with nothing loaded.
+        tree_container = QWidget()
+        tree_layout = QVBoxLayout(tree_container)
+        tree_layout.setContentsMargins(0, 0, 0, 0)
+        tree_layout.setSpacing(0)
+        tree_layout.addWidget(self.midifi_notice_banner)
+        tree_layout.addWidget(self.tree, 1)
+        self.tree_container = tree_container
+
         self.central_stack = QStackedWidget()
         self.central_stack.addWidget(self.empty_state_widget)
-        self.central_stack.addWidget(self.tree)
+        self.central_stack.addWidget(tree_container)
         self.central_stack.setCurrentWidget(self.empty_state_widget)
         self.setCentralWidget(self.central_stack)
 
@@ -437,6 +520,39 @@ class MainWindow(QMainWindow):
                 ):
                     group_item.setText(COL_KS, midi_note_name(group.profile_item.keyswitch_note))
 
+                # Midi-fy toggle - realizes a trill into real
+                # alternating notes on demand, INSTANTLY (no rebuild
+                # warning, unlike the tremolo threshold - see
+                # core/midifi.py and Track.get_active_notes). Only
+                # shown for a genuine, single-track trill group -
+                # checked against the underlying Track's immutable
+                # .label (not group.name, which the user may have
+                # renamed) so detection never breaks from a rename.
+                # Hidden entirely (not just disabled) for anything
+                # else, same "empty cell reads clearer than a
+                # permanently-greyed control" convention already used
+                # for KS.
+                if not group.is_merged and "Trill" in group.tracks[0].label:
+                    track = group.tracks[0]
+                    midifi_checkbox = QCheckBox()
+                    midifi_checkbox.setFixedHeight(ROW_HEIGHT - 8)
+                    midifi_checkbox.setChecked(track.midifi_toggle_active)
+                    midifi_checkbox.setToolTip(
+                        "Realize this trill into alternating notes "
+                        "(for libraries without a dedicated trill patch)"
+                    )
+                    midifi_checkbox.toggled.connect(
+                        lambda checked, t=track: self.on_trill_midifi_toggled(t, checked)
+                    )
+                    midifi_wrapper = QWidget()
+                    midifi_wrapper.setStyleSheet("background: transparent;")
+                    midifi_layout = QVBoxLayout(midifi_wrapper)
+                    midifi_layout.setContentsMargins(0, 0, 0, 0)
+                    midifi_layout.addStretch(1)
+                    midifi_layout.addWidget(midifi_checkbox)
+                    midifi_layout.addStretch(1)
+                    self.tree.setItemWidget(group_item, COL_MIDIFI, midifi_wrapper)
+
         self.tree.expandAll()
         self.tree.blockSignals(False)
         self.update_action_states()
@@ -572,12 +688,15 @@ class MainWindow(QMainWindow):
         self.export_action.setEnabled(False)
         self.auto_merge_action.setEnabled(False)
         self.merge_accents_action.setEnabled(False)
+        self.merge_midifi_action.setEnabled(False)
+        self.midifi_dialog_action.setEnabled(False)
         self.save_session_action.setEnabled(False)
         self.save_session_as_action.setEnabled(False)
         self.close_file_action.setEnabled(False)
         self.merge_action.setEnabled(False)
         self.rename_action.setEnabled(False)
 
+        self.midifi_notice_banner.setVisible(False)
         self.central_stack.setCurrentWidget(self.empty_state_widget)
         self._update_window_title()
         self.statusBar().showMessage("Closed file", 3000)
@@ -652,8 +771,9 @@ class MainWindow(QMainWindow):
         self.close_file_action.setEnabled(True)
 
         self.refresh_tree()
-        self.central_stack.setCurrentWidget(self.tree)
+        self.central_stack.setCurrentWidget(self.tree_container)
         self._update_window_title()
+        self._check_midifi_notice(file_path)
         self.statusBar().showMessage(
             f"Loaded: {os.path.basename(file_path)} "
             f"({len(self.session.instruments)} instrument(s), "
@@ -721,7 +841,7 @@ class MainWindow(QMainWindow):
         self.close_file_action.setEnabled(True)
 
         self.refresh_tree()
-        self.central_stack.setCurrentWidget(self.tree)
+        self.central_stack.setCurrentWidget(self.tree_container)
         self._update_window_title()
 
         message = f"Opened session: {os.path.basename(file_path)}"
@@ -894,14 +1014,19 @@ class MainWindow(QMainWindow):
         self.refresh_tree()
 
     def open_midifi_dialog(self):
-        """Opens the Midi-fy tool. Confirming a change there triggers
-        a FULL SESSION REBUILD - re-parses loaded_file_path fresh with
-        the new config and replaces self.session entirely, discarding
-        any manual customization made since the file was loaded (the
-        dialog itself warns about this before confirming - see
-        midifi_dialog.py). Consistent with how this app already
-        handles Profile reapplication: always rebuild clean from
-        source, never incrementally patch.
+        """Opens the Midi-fy tool. What happens on confirm depends on
+        WHICH setting changed - the dialog itself decides this (see
+        MidifiDialog._apply / .requires_rebuild) and this handler just
+        branches on it:
+        - Tremolo threshold changed: full session rebuild, re-parses
+          loaded_file_path fresh and replaces self.session entirely,
+          discarding any manual customization since load (the dialog
+          already warned about this before confirming). Consistent
+          with how Profile reapplication already works.
+        - Trill rate only: instant - just swaps in the new config and
+          redraws the tree, no rebuild, no data loss, because trill
+          realization is computed fresh on demand every time (see
+          Track.get_active_notes) rather than baked in once.
         """
         if self.session is None or self.loaded_file_path is None:
             return
@@ -914,15 +1039,20 @@ class MainWindow(QMainWindow):
 
         new_config = dialog.result_config
 
-        try:
-            score = load_score(self.loaded_file_path, midifi_config=new_config)
-        except Exception as e:
-            QMessageBox.critical(self, "Failed to rebuild session", str(e))
-            return
+        if dialog.requires_rebuild:
+            try:
+                score = load_score(self.loaded_file_path, midifi_config=new_config)
+            except Exception as e:
+                QMessageBox.critical(self, "Failed to rebuild session", str(e))
+                return
 
-        self.session = Session.from_score(score, midifi_config=new_config)
-        self.refresh_tree()
-        self.statusBar().showMessage("Session rebuilt with updated Midi-fy settings", 5000)
+            self.session = Session.from_score(score, midifi_config=new_config)
+            self.refresh_tree()
+            self.statusBar().showMessage("Session rebuilt with updated Midi-fy settings", 5000)
+        else:
+            self.session.midifi_config = new_config
+            self.refresh_tree()
+            self.statusBar().showMessage("Midi-fy settings updated", 5000)
 
     def rename_selected(self):
         checked_instruments, checked_groups = self.get_checked_items()
@@ -1035,5 +1165,18 @@ class MainWindow(QMainWindow):
         # (gated on this same flag) updates immediately, rather than
         # staying stale until some unrelated action happens to
         # trigger a rebuild.
+        self.refresh_tree()
+
+    def on_trill_midifi_toggled(self, track, checked):
+        """Instant - just flips the flag and redraws the tree, no
+        rebuild-from-source warning. This is exactly the point of the
+        non-destructive architecture built in step 2 - Track.notes
+        (the original) is never touched, so there's nothing to warn
+        about losing. refresh_tree() here is a cheap UI-only redraw
+        (walking the already-in-memory Session), not a re-parse - the
+        same cost as any other tree refresh in this app, not the
+        "rebuild from source" tremolo's threshold change triggers.
+        """
+        track.midifi_toggle_active = checked
         self.refresh_tree()
 

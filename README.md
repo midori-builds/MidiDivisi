@@ -59,6 +59,7 @@ Roughly in priority order:
 - [PyQt6](https://pypi.org/project/PyQt6/)
 - [music21](https://pypi.org/project/music21/)
 - [mido](https://pypi.org/project/mido/)
+- [verovio](https://pypi.org/project/verovio/) — notation rendering for the Preview feature
 
 ## Running it
 

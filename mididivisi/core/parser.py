@@ -279,6 +279,35 @@ def apply_dynamics_to_part(part):
         n.volume.velocityIsRelative = False
 
 
+def get_trill_interval(n):
+    """Determine the interval (music21 Interval object, e.g. M2/m2)
+    for a Trill expression on note n, using the same context-dependent
+    inference music21 itself needs (the interval isn't written
+    explicitly in MusicXML for a plain trill - it's inferred from the
+    note's pitch and the surrounding key signature, same as a
+    performer reading the score would).
+
+    Returns None if there's no Trill expression on n, or if inference
+    fails for any reason - callers should treat None as "leave this
+    note untouched" rather than guessing.
+
+    Needs n to still be attached to its original stream (for the key
+    signature context lookup) - this is why trill interval detection
+    happens once, at parse time, with the result STORED as a plain
+    attribute (see resolve_trill_pitch_detection) rather than
+    recomputed later when the note may have been detached from that
+    context.
+    """
+    trill_exprs = [e for e in n.expressions if e.__class__.__name__ == "Trill"]
+    if not trill_exprs:
+        return None
+    try:
+        key_sig = n.getContextByClass(key.KeySignature)
+        return trill_exprs[0].getSize(n, keySig=key_sig)
+    except Exception:
+        return None
+
+
 def get_note_level_label(n):
     """Build a label describing the per-note articulation/technique
     markings on a single Note or Chord - the ones attached directly to
@@ -303,18 +332,8 @@ def get_note_level_label(n):
         if cls == "Tremolo":
             labels.append(cls)
         elif cls == "Trill":
-            # Interval (whole-step M2 vs half-step m2) isn't written
-            # explicitly in MusicXML for a plain trill - it's inferred
-            # from the note's pitch and the surrounding key signature,
-            # same as a performer reading the score would. Falls back
-            # to a plain "Trill" label if inference fails for any
-            # reason, rather than crashing the whole parse.
-            try:
-                key_sig = n.getContextByClass(key.KeySignature)
-                size = e.getSize(n, keySig=key_sig)
-                labels.append(f"Trill-{size.name}")
-            except Exception:
-                labels.append("Trill")
+            size = get_trill_interval(n)
+            labels.append(f"Trill-{size.name}" if size is not None else "Trill")
 
     for sp in n.getSpannerSites():
         cls = sp.__class__.__name__

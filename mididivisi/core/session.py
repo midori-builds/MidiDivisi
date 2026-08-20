@@ -41,8 +41,60 @@ Groups are currently owned by which Instrument.
 
 import uuid
 
-from mididivisi.core.parser import get_part_articulation_groups, get_tempo_timeline
-from mididivisi.core.midifi import MidifiConfig, MIDIFI_SOURCE_LABEL_PREFIX
+from mididivisi.core.parser import get_part_articulation_groups, get_tempo_timeline, get_trill_interval
+from mididivisi.core.midifi import MidifiConfig, MIDIFI_SOURCE_LABEL_PREFIX, realize_trill_notes
+import copy
+
+
+def realize_track_trills(notes, midifi_config):
+    """Given a track's ORIGINAL notes (untouched), return a NEW list
+    where every trill-marked note is replaced by its realized
+    alternating notes (see midifi.realize_trill_notes), and every
+    other note passes through completely unchanged. Never mutates the
+    input list or any note within it - safe to call repeatedly/on
+    demand, which is the whole point (this is what makes the trill
+    toggle instant rather than needing a session rebuild - see
+    Track.get_active_notes).
+
+    Lives here rather than in core/midifi.py specifically to avoid a
+    circular import: parser.py already imports from midifi.py, so
+    midifi.py can't import get_trill_interval back from parser.py.
+    session.py already legitimately depends on both, so the "wire the
+    pure computation to real track data" concern lives here instead -
+    midifi.py stays pure computation with no parser.py dependency.
+    """
+    result = []
+    for n in notes:
+        if not n.isNote:
+            result.append(n)
+            continue
+
+        interval_obj = get_trill_interval(n)
+        if interval_obj is None:
+            result.append(n)
+            continue
+
+        upper_pitch = interval_obj.transposePitch(n.pitch)
+        realized = realize_trill_notes(
+            n.pitch.midi, upper_pitch.midi, n.duration.quarterLength,
+            midifi_config.trill_notes_per_quarter,
+        )
+
+        for pitch_midi, offset, duration in realized:
+            # Deep-copy the WHOLE original note before mutating -
+            # preserves articulations/dynamics/etc. on every resulting
+            # note, same lesson already learned (the hard way) for
+            # both divisi's chord-splitting and tremolo's realization.
+            new_note = copy.deepcopy(n)
+            new_note.pitch.midi = pitch_midi
+            new_note.duration.quarterLength = duration
+            new_note.offset = n.offset + offset
+            new_note.expressions = [
+                e for e in new_note.expressions if e.__class__.__name__ != "Trill"
+            ]
+            result.append(new_note)
+
+    return result
 
 
 class Track:
@@ -58,8 +110,37 @@ class Track:
         self.id = str(uuid.uuid4())
         self.instrument_identity = instrument_identity  # permanent link, never changes
         self.label = label  # original articulation label, provenance, never changes
-        self.notes = notes  # list of music21 Note/Chord objects, never mutated here
+        self.notes = notes  # list of music21 Note/Chord objects, NEVER mutated - the
+                             # permanent, untouched original data, even when midi-fy is active
         self.name = f"{instrument_identity.name} - {label}"  # mutable, user-editable
+
+        # Per-track, INSTANT on-demand midi-fy toggle (see
+        # core/midifi.py) - deliberately NOT the same mechanism
+        # tremolo uses (a destructive parse-time rewrite requiring a
+        # full session rebuild to undo). Toggling this never mutates
+        # self.notes - get_active_notes() computes the realization
+        # fresh from the untouched originals every time it's asked,
+        # so switching this back off has nothing to recover FROM,
+        # because nothing was ever destroyed.
+        self.midifi_toggle_active = False
+
+    def get_active_notes(self, midifi_config=None):
+        """Returns this track's notes as they should currently be
+        displayed/exported - the original untouched notes if the
+        toggle is off (or no config is given, e.g. an older caller
+        that hasn't been updated), or a freshly-computed realization
+        if it's on.
+
+        Computed on demand every call rather than cached - trill
+        realization is cheap (simple arithmetic over at most a few
+        hundred notes), and NOT caching sidesteps any risk of a stale
+        cache if midifi_config changes while the toggle is active
+        (e.g. the rate is later adjusted) - the next call just
+        reflects whatever the current config says, automatically.
+        """
+        if not self.midifi_toggle_active or midifi_config is None:
+            return self.notes
+        return realize_track_trills(self.notes, midifi_config)
 
     @property
     def natural_key(self):
@@ -179,15 +260,22 @@ class Group:
         if not self.is_merged:
             self.tracks[0].name = new_name
 
-    def get_combined_notes(self):
-        """Combine every member Track's notes into one list. Only
-        meant to be called at export time - never mutates the
+    def get_combined_notes(self, midifi_config=None):
+        """Combine every member Track's currently-active notes into
+        one list (see Track.get_active_notes - the original untouched
+        notes unless that track's midi-fy toggle is on). Only meant
+        to be called at export/display time - never mutates the
         underlying Tracks, so this is always safe to call repeatedly
         (e.g. if the user exports, adjusts a track, exports again).
+
+        midifi_config defaults to None (ignoring any active toggle,
+        same as before this parameter existed) for backward
+        compatibility with any caller that hasn't been updated to pass
+        it - every real caller in this codebase does pass it.
         """
         combined = []
         for track in self.tracks:
-            combined.extend(track.notes)
+            combined.extend(track.get_active_notes(midifi_config))
         return combined
 
     def __repr__(self):
