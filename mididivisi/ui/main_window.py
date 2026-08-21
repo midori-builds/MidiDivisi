@@ -199,6 +199,19 @@ class MainWindow(QMainWindow):
         self.midifi_dialog_action.setEnabled(False)  # needs a loaded session's file path to rebuild against
         midifi_menu.addAction(self.midifi_dialog_action)
 
+        view_menu = menu_bar.addMenu("View")
+        view_menu.setFixedWidth(100)
+
+        self.expand_all_action = QAction("Expand All", self)
+        self.expand_all_action.triggered.connect(lambda: self.tree.expandAll())
+        self.expand_all_action.setEnabled(False)  # nothing to expand without a loaded tree
+        view_menu.addAction(self.expand_all_action)
+
+        self.collapse_all_action = QAction("Collapse All", self)
+        self.collapse_all_action.triggered.connect(lambda: self.tree.collapseAll())
+        self.collapse_all_action.setEnabled(False)
+        view_menu.addAction(self.collapse_all_action)
+
         help_menu = menu_bar.addMenu("Help")
         help_menu.setFixedWidth(78)
 
@@ -330,7 +343,7 @@ class MainWindow(QMainWindow):
         self.tree.setColumnWidth(COL_NAME, 450)
         self.tree.setColumnWidth(COL_MERGED, 65)
         self.tree.setColumnWidth(COL_PROFILE, 170)
-        self.tree.setColumnWidth(COL_KS, 35)
+        self.tree.setColumnWidth(COL_KS, 45)
         self.tree.setColumnWidth(COL_PREVIEW, 65)
         self.tree.setColumnWidth(COL_MIDIFI, 55)
         # Checkboxes are the selection mechanism here, not native row
@@ -895,6 +908,8 @@ class MainWindow(QMainWindow):
         self.save_session_action.setEnabled(False)
         self.save_session_as_action.setEnabled(False)
         self.close_file_action.setEnabled(False)
+        self.expand_all_action.setEnabled(False)
+        self.collapse_all_action.setEnabled(False)
         self.merge_action.setEnabled(False)
         self.rename_action.setEnabled(False)
 
@@ -971,6 +986,8 @@ class MainWindow(QMainWindow):
         self.save_session_action.setEnabled(True)
         self.save_session_as_action.setEnabled(True)
         self.close_file_action.setEnabled(True)
+        self.expand_all_action.setEnabled(True)
+        self.collapse_all_action.setEnabled(True)
 
         self.refresh_tree()
         self.central_stack.setCurrentWidget(self.tree_container)
@@ -1041,6 +1058,8 @@ class MainWindow(QMainWindow):
         self.save_session_action.setEnabled(True)
         self.save_session_as_action.setEnabled(True)
         self.close_file_action.setEnabled(True)
+        self.expand_all_action.setEnabled(True)
+        self.collapse_all_action.setEnabled(True)
 
         self.refresh_tree()
         self.central_stack.setCurrentWidget(self.tree_container)
