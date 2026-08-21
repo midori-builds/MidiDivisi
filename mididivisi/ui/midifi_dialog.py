@@ -22,6 +22,8 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QSpinBox,
+    QDoubleSpinBox,
+    QCheckBox,
     QPushButton,
     QMessageBox,
 )
@@ -99,6 +101,43 @@ class MidifiDialog(QDialog):
         trill_rate_row.addStretch(1)
         layout.addLayout(trill_rate_row)
 
+        # --- Arpeggio section ---
+        layout.addWidget(QLabel("<b>Arpeggio</b>"))
+
+        arpeggio_enable_row = QHBoxLayout()
+        self.arpeggio_enable_checkbox = QCheckBox("Enable arpeggio midi-fy")
+        self.arpeggio_enable_checkbox.setChecked(current_config.arpeggio_enabled)
+        arpeggio_enable_row.addWidget(self.arpeggio_enable_checkbox)
+        arpeggio_enable_row.addWidget(_help_badge(
+            "When on, EVERY arpeggio-marked chord in the piece is "
+            "realized into a staggered roll - there's no per-row "
+            "toggle for this one, since no sample library has a "
+            "dedicated arpeggio patch to opt out for. Applies "
+            "instantly, no rebuild needed."
+        ))
+        arpeggio_enable_row.addStretch(1)
+        layout.addLayout(arpeggio_enable_row)
+
+        arpeggio_rate_row = QHBoxLayout()
+        arpeggio_rate_row.addWidget(QLabel("Roll rate (delay/note):"))
+
+        self.arpeggio_rate_spin = QDoubleSpinBox()
+        self.arpeggio_rate_spin.setRange(0.0, 2.0)
+        self.arpeggio_rate_spin.setSingleStep(0.0625)
+        self.arpeggio_rate_spin.setDecimals(4)
+        self.arpeggio_rate_spin.setValue(current_config.arpeggio_delay_per_note)
+        self.arpeggio_rate_spin.setFixedSize(90, 28)
+        arpeggio_rate_row.addWidget(self.arpeggio_rate_spin)
+
+        arpeggio_rate_row.addWidget(_help_badge(
+            "Delay between each note of a toggled-on arpeggio roll, in "
+            "quarter notes (tempo-relative) - e.g. 0.125 is a 32nd "
+            "note. Every note still rings to the chord's original "
+            "written length. Applies instantly, no rebuild needed."
+        ))
+        arpeggio_rate_row.addStretch(1)
+        layout.addLayout(arpeggio_rate_row)
+
         layout.addStretch(1)
 
         # --- Buttons ---
@@ -145,6 +184,8 @@ class MidifiDialog(QDialog):
         new_config = MidifiConfig()
         new_config.tremolo_min_unmeasured_flags = new_tremolo_threshold
         new_config.trill_notes_per_quarter = new_trill_rate
+        new_config.arpeggio_delay_per_note = self.arpeggio_rate_spin.value()
+        new_config.arpeggio_enabled = self.arpeggio_enable_checkbox.isChecked()
 
         self.result_config = new_config
         self.requires_rebuild = tremolo_changed

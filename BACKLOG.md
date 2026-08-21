@@ -89,8 +89,61 @@ each in DEVLOG.md):
   on was silently corrupting the same passage's ability to be
   correctly toggled again afterward) - see DEVLOG.md for the full
   story.
+- Arpeggio - non-destructive, computed fresh on demand (like trill).
+  No per-row checkbox (unlike trill/tremolo spanner, there's no known
+  sample-library case where a per-passage opt-out would matter, so
+  one global setting in the Midi-fy dialog covers every real case),
+  but DOES get its own separate "Midifi+X" track, matching tremolo's
+  existing labeling convention exactly - mergeable via the same
+  "Merge Midi-fy" button that already handles tremolo, or a regular
+  manual merge, entirely the user's choice. Went through two real
+  redesigns to land here, not one: first version gave arpeggio its own
+  dedicated checkbox and label, which broke on merging a differently-
+  labeled group; the immediate fix (remove the label entirely, fold
+  into the base articulation) solved that but made arpeggio invisible
+  and unmergeable ON PURPOSE, which wasn't actually what was wanted -
+  the real ask was to keep the separate track AND make it mergeable,
+  not remove the track. One real semantic wrinkle worth knowing: the
+  "Midifi+X" label means something different here than it does for
+  tremolo - tremolo's use of it means the note has ALREADY been
+  destructively realized by the time the label exists; arpeggio's
+  means the note WILL BE realized if the global setting is on. Both
+  the enable flag and the roll rate apply instantly, no rebuild
+  needed, same as trill's rate - and every note still rings to the
+  chord's original written length regardless of stagger. Cross-staff
+  arpeggios (spanning the two separate Instruments a grand-staff
+  instrument becomes by default) combine correctly via one primary
+  track emitting the full roll and carrying the label (the secondary
+  member's track correctly stays unlabeled, since its own contribution
+  never produces output on its own) - confirmed directly this involves
+  no destructive editing on any track. Detection required working
+  around two real, confirmed MuseScore export bugs (not music21's
+  fault) - full history, including both bugs, all the redesigns, and a
+  related non-arpeggiate detection fix found along the way, in
+  DEVLOG.md.
 
 **Not yet built:**
+- **Tremolo (single-note) needs to be migrated to the non-destructive
+  architecture (matching trill/tremolo spanner/arpeggio) - this is a
+  FIRM, CONFIRMED commitment, not a maybe.** Tremolo's current model
+  is a destructive, parse-time rewrite: the original note is
+  physically mutated before Session.from_score() even runs, meaning
+  any manual work done in a session gets discarded the moment the
+  threshold setting changes. This was explicitly deferred (not
+  abandoned) very early on, specifically so the non-destructive
+  pattern could be proven on trill first rather than migrating a
+  working feature and building brand-new infrastructure in the same
+  pass - a deliberate, reasonable sequencing choice at the time. But
+  after being reminded of this repeatedly across later work (arpeggio
+  and tremolo spanner both got built non-destructively from day one;
+  tremolo has not yet been retrofitted despite that always being the
+  plan), this needed to be a real, explicit, standalone backlog item
+  rather than something living only as buried context in DEVLOG.md -
+  that gap is likely part of why it kept needing to be re-raised.
+  Shape of the fix: same "resolve once at parse time, store plain
+  data, compute realization fresh on demand" pattern already proven
+  three times now (trill, tremolo spanner, arpeggio) - no new
+  architecture to invent, just apply the existing one here too.
 - **Instrument/interval classification system** - needed by BOTH
   trill (oscillation vs. tremolo-style, e.g. timpani) and tremolo
   spanner (some owned libraries have dedicated 3rd-interval trill
@@ -108,10 +161,6 @@ each in DEVLOG.md):
   function already takes them as real parameters with hardcoded
   defaults, so this should be wiring, not restructuring, when
   tackled.
-- **Arpeggio** - a chord marked `<arpeggiate>`. No sample library has
-  an "arpeggio patch" - needs to become real staggered note-on events.
-  Direction-aware (up/down/non-arpeggio) data is already retrievable
-  via `ArpeggioMarkSpanner`/`ArpeggioMark.type`, just not used yet.
 - **Glissando** - currently labeled/separated into its own track
   (some harp libraries have a dedicated gliss patch), but for
   libraries that don't, this needs the same "expand into real notes"

@@ -544,34 +544,66 @@ class MainWindow(QMainWindow):
 
                 # Midi-fy toggle - INSTANT (no rebuild warning, unlike
                 # the tremolo threshold - see core/midifi.py and
-                # Track.get_active_notes). Only shown for a genuine,
-                # single-track group whose content this feature
-                # actually applies to - checked against the underlying
-                # Track's immutable .label (not group.name, which the
-                # user may have renamed) so detection never breaks
-                # from a rename. Hidden entirely (not just disabled)
-                # for anything else, same "empty cell reads clearer
-                # than a permanently-greyed control" convention
-                # already used for KS.
+                # Track.get_active_notes). Only shown for a genuine
+                # group whose content this feature actually applies
+                # to - checked against the underlying Track's
+                # immutable .label (not group.name, which the user may
+                # have renamed) so detection never breaks from a
+                # rename. Hidden entirely (not just disabled) for
+                # anything else, same "empty cell reads clearer than a
+                # permanently-greyed control" convention already used
+                # for KS.
                 #
-                # Two content types share this one checkbox/handler,
-                # but need DIFFERENT tooltip wording - trill's off
-                # state is just "untouched," nothing to explain, while
-                # tremolo spanner's off state is ALSO a real
-                # transformation (collapse to one sustained note/chord
-                # for a dedicated patch), which the tooltip needs to
-                # actually say or the checkbox's default (unchecked)
-                # state would look like "does nothing" when it
-                # actually changes the export output either way.
+                # Arpeggio deliberately has NO checkbox here at all -
+                # unlike trill/tremolo spanner, there's no known
+                # sample-library case where a per-passage opt-out
+                # would matter, so it's controlled by one global
+                # setting in the Midi-fy dialog instead. It DOES still
+                # get its own separate "Midifi+X" track, though,
+                # exactly matching tremolo's own labeling convention
+                # (see parser.get_note_level_label and
+                # MIDIFI_SOURCE_LABEL_PREFIX) - a real, deliberate
+                # design choice, not an oversight: an earlier version
+                # of this removed arpeggio's label entirely, folding
+                # it invisibly into its base articulation's group, but
+                # that made it impossible to see or merge on purpose -
+                # the user explicitly wants the separate track back,
+                # mergeable via the SAME "Merge Midi-fy" button that
+                # already handles tremolo, or via a regular manual
+                # merge, exactly as they choose. The one real
+                # difference from tremolo's own use of this label:
+                # tremolo's "Midifi+X" means the note has ALREADY been
+                # destructively realized by the time that label exists;
+                # arpeggio's means the note WILL BE realized if the
+                # global setting is on - the underlying note itself
+                # stays completely untouched either way, computed
+                # fresh on demand exactly like trill.
                 label = group.tracks[0].label
-                is_trill = "Trill" in label
-                is_tremolo_spanner = "Tremolo-" in label
+                # Checking against EVERY track in the group (not just
+                # the first) is what correctly handles a merged group
+                # - confirmed directly that merging combines matching-
+                # label groups together (e.g. both staves of a grand-
+                # staff harp end up with matching-labeled tracks), so
+                # there's no ambiguity about what a single checkbox
+                # should control.
+                all_same_label = all(t.label == label for t in group.tracks)
+                is_trill = all_same_label and "Trill" in label
+                is_tremolo_spanner = all_same_label and "Tremolo-" in label
 
-                if not group.is_merged and (is_trill or is_tremolo_spanner):
-                    track = group.tracks[0]
+                if is_trill or is_tremolo_spanner:
+                    tracks = group.tracks
                     midifi_checkbox = QCheckBox()
                     midifi_checkbox.setFixedHeight(ROW_HEIGHT - 8)
-                    midifi_checkbox.setChecked(track.midifi_toggle_active)
+                    # Checked only if EVERY track in the group is
+                    # currently toggled on - a simple, unambiguous
+                    # state for the common case (all tracks toggled
+                    # together, matching how a user would naturally
+                    # expect one checkbox to behave for a merged row)
+                    # rather than a three-state partial indicator,
+                    # which would be more correct for a mixed state
+                    # but adds real complexity for something that
+                    # shouldn't come up often in practice.
+                    midifi_checkbox.setChecked(all(t.midifi_toggle_active for t in tracks))
                     if is_trill:
                         midifi_checkbox.setToolTip(
                             "Realize this trill into alternating notes "
@@ -584,7 +616,7 @@ class MainWindow(QMainWindow):
                             "for a dedicated tremolo/roll patch."
                         )
                     midifi_checkbox.toggled.connect(
-                        lambda checked, t=track: self.on_midifi_toggled(t, checked)
+                        lambda checked, ts=tracks: self.on_midifi_toggled(ts, checked)
                     )
                     midifi_wrapper = QWidget()
                     midifi_wrapper.setStyleSheet("background: transparent;")
@@ -1331,24 +1363,32 @@ class MainWindow(QMainWindow):
         # trigger a rebuild.
         self.refresh_tree()
 
-    def on_midifi_toggled(self, track, checked):
-        """Instant - just flips the flag and redraws the tree, no
+    def on_midifi_toggled(self, tracks, checked):
+        """Instant - just flips the flag(s) and redraws the tree, no
         rebuild-from-source warning. This is exactly the point of the
         non-destructive architecture built for trill, later
-        generalized for tremolo spanner - Track.notes (the original)
-        is never touched, so there's nothing to warn about losing.
-        refresh_tree() here is a cheap UI-only redraw (walking the
-        already-in-memory Session), not a re-parse - the same cost as
-        any other tree refresh in this app, not the "rebuild from
-        source" tremolo's THRESHOLD change triggers (a different,
-        unrelated setting - single-note tremolo, not this spanner
+        generalized for tremolo spanner and arpeggio - Track.notes
+        (the original) is never touched, so there's nothing to warn
+        about losing. refresh_tree() here is a cheap UI-only redraw
+        (walking the already-in-memory Session), not a re-parse - the
+        same cost as any other tree refresh in this app, not the
+        "rebuild from source" tremolo's THRESHOLD change triggers (a
+        different, unrelated setting - single-note tremolo, not this
         toggle).
 
+        Takes a LIST of tracks, not a single one - a merged group can
+        legitimately hold several same-labeled tracks (e.g. both
+        staves of a merged grand-staff harp, both tagged "Arpeggio"),
+        and one checkbox correctly toggles ALL of them together in
+        that case. An unmerged group just passes its own single-
+        element track list, so this one code path handles both.
+
         Shared across every midi-fy-toggleable content type (trill,
-        tremolo spanner) - what happens on toggle is generic (flip the
-        flag), it's Track.get_active_notes() that knows how to
-        interpret the flag differently per content type.
+        tremolo spanner, arpeggio) - what happens on toggle is generic
+        (flip the flag(s)), it's Track.get_active_notes() that knows
+        how to interpret the flag differently per content type.
         """
-        track.midifi_toggle_active = checked
+        for track in tracks:
+            track.midifi_toggle_active = checked
         self.refresh_tree()
 

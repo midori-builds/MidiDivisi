@@ -52,6 +52,7 @@ from mididivisi.core.midifi import (
     realize_trill_notes,
     realize_tremolo_spanner_notes,
     collapse_tremolo_spanner_to_base,
+    realize_arpeggio_notes,
 )
 from music21 import chord as m21chord, pitch as m21pitch
 import copy
@@ -202,6 +203,103 @@ def realize_track_tremolo_spanner(notes, toggle_active):
     return result
 
 
+def realize_track_arpeggio(notes, delay_per_note):
+    """Given a track's ORIGINAL notes (untouched), return a NEW list
+    where every arpeggio-tagged note/chord is replaced by its
+    realized roll, and every other note passes through unchanged.
+
+    Unlike trill/tremolo spanner, arpeggio has NO per-track toggle at
+    all - there's no known sample-library case where a per-passage
+    opt-out would matter (unlike trill's timpani-style rolls or
+    tremolo spanner's 3rd-interval patches), so the decision is a
+    single global setting (MidifiConfig.arpeggio_enabled), checked by
+    the caller (Track.get_active_notes) before this function is ever
+    called. This function itself doesn't know or care about that flag
+    - it just realizes whatever arpeggio-tagged content it finds,
+    unconditionally, whenever it's invoked.
+
+    Applies regardless of a track's label - deliberately, since
+    arpeggio-marked notes were made to NOT get their own dedicated
+    label in the first place (see parser.get_note_level_label), so
+    they naturally stay within whatever group their base articulation
+    already belongs to. Real motivating case this fixes: previously,
+    arpeggio content lived in its own "Arpeggio" group/track, which
+    broke the moment a user tried to merge it with a neighboring
+    "Sustain" group - either the merge created an ambiguous mixed-
+    label group, or (after an earlier fix) the checkbox simply
+    vanished for genuinely different-label merges. Removing the label
+    means there's no separate group to merge in the first place.
+
+    Cross-staff events (this track's note is only ONE of several
+    members spanning multiple staves - see
+    parser.resolve_arpeggio_groups) are handled by a deliberate
+    simplification, confirmed with the user directly rather than
+    assumed: only the PRIMARY member (whichever staff was encountered
+    first during detection - an arbitrary but deterministic choice,
+    since the final audible result doesn't depend on which MIDI track
+    a note lives in, multi-track MIDI files play every track
+    simultaneously regardless) emits the FULL combined roll, using
+    pitches from every staff involved. Every other member's track
+    contributes nothing for that specific moment - already covered by
+    the primary's emission. This is genuinely non-destructive despite
+    the asymmetry: Track.notes on EVERY involved track stays completely
+    untouched either way, so toggling back off instantly and exactly
+    restores each track's own original note, nothing is ever lost.
+
+    A 'non-arpeggio'-marked chord (an explicit "don't roll this one,
+    unlike its neighbors" marking) is passed through completely
+    unchanged - it was never a roll candidate in the first place.
+
+    Never mutates the input list or any note within it.
+    """
+    result = []
+
+    for n in notes:
+        info = getattr(n, "mididivisi_arpeggio_info", None)
+        if info is None:
+            result.append(n)
+            continue
+
+        if info["direction"] == "non-arpeggio":
+            # Explicitly marked "don't roll this one" (a bracket
+            # instead of a squiggly line in the source, contrasting
+            # with surrounding chords that SHOULD roll) - pass through
+            # completely unchanged, same as any note with no arpeggio
+            # marking at all. This check belongs here now rather than
+            # at labeling time (where it used to live, when arpeggio
+            # still had its own dedicated label) - the realization
+            # decision itself is the right place for it.
+            result.append(n)
+            continue
+
+        if not getattr(n, "mididivisi_arpeggio_is_primary", False):
+            continue  # a non-primary member of a cross-staff event - already covered by the primary
+
+        all_pitches = []
+        for member in info["members"]:
+            all_pitches.extend(member["pitches"])
+
+        # All members of one true event share the same duration in
+        # every real case checked - use the primary's own duration as
+        # the authoritative value.
+        primary_member = info["members"][0]
+        total_duration = primary_member["duration"]
+
+        realized = realize_arpeggio_notes(all_pitches, total_duration, delay_per_note, info["direction"])
+
+        base_offset = info["offset"]
+
+        for pitch, rel_offset, duration in realized:
+            new_chord = m21chord.Chord([m21pitch.Pitch(midi=pitch)])
+            new_chord.duration.quarterLength = duration
+            new_chord.offset = base_offset + rel_offset
+            new_chord.volume.velocity = primary_member["velocity"]
+            new_chord.articulations = copy.deepcopy(primary_member["articulations"])
+            result.append(new_chord)
+
+    return result
+
+
 class Track:
     """One base articulation group, as originally detected by the
     parser. Created once at load time and never destroyed - identity
@@ -233,41 +331,62 @@ class Track:
         """Returns this track's notes as they should currently be
         displayed/exported - dispatches by content type, since
         different midi-fy features need genuinely different "off"
-        semantics, not just "toggle on vs off":
+        semantics and different SCOPES of control, not just "toggle
+        on vs off" uniformly:
         - Tremolo spanner (label contains "Tremolo-" with an interval,
           e.g. "Tremolo-M3" - distinct from single-note tremolo's bare
           "Tremolo" label): BOTH states are real transformations - off
           collapses to one sustained chord (the new default,
           replacing the old placeholder), on alternates between the
           spanner's two sides. Always computed, regardless of toggle
-          state.
-        - Everything else (trill, or no midi-fy-toggleable content at
-          all): the original, simpler case - off means "return the
-          untouched originals" (nothing to compute), on realizes via
-          realize_track_trills.
+          state. Per-TRACK control (label-based).
+        - Trill (label contains "Trill"): off means "return the
+          untouched originals" (nothing to compute - a plain trill
+          mark left as-is already exports correctly as a normal
+          note). Per-TRACK control (label-based, gated by
+          midifi_toggle_active).
+        - Arpeggio: applied as an ADDITIONAL pass on top of whatever
+          the above produced, REGARDLESS of this track's label -
+          deliberately, arpeggio-marked notes carry NO dedicated
+          label at all (see parser.get_note_level_label), so they
+          naturally stay within whatever group their base articulation
+          already belongs to rather than needing their own group that
+          would then need merging. Gated by a single GLOBAL setting
+          (midifi_config.arpeggio_enabled), not a per-track toggle -
+          there's no known sample-library case where a per-passage
+          opt-out would matter the way trill/tremolo spanner's do.
+          realize_track_arpeggio() itself already only touches notes
+          actually carrying the arpeggio marker, passing everything
+          else through untouched, so chaining it after the label-
+          based dispatch is always safe regardless of what that
+          produced.
 
         No config given (e.g. an older caller that hasn't been
         updated) always falls back to the untouched originals,
-        uniformly across every content type - a simple, safe default
-        even though tremolo spanner doesn't strictly need config
-        VALUES for its own computation.
+        uniformly across every content type.
 
-        Computed on demand every call rather than cached - this
-        realization is cheap (simple arithmetic over at most a few
-        hundred notes), and NOT caching sidesteps any risk of a stale
-        cache if midifi_config changes while a toggle is active (e.g.
-        trill's rate is later adjusted) - the next call just reflects
-        whatever the current config says, automatically.
+        Computed on demand every call rather than cached - cheap
+        (simple arithmetic over at most a few hundred notes), and NOT
+        caching sidesteps any risk of a stale result if midifi_config
+        changes while active (e.g. trill's rate, or arpeggio's enable
+        flag, adjusted later) - the next call just reflects whatever
+        the current config says, automatically, with no rebuild
+        needed for any of this.
         """
         if midifi_config is None:
             return self.notes
 
         if "Tremolo-" in self.label:
-            return realize_track_tremolo_spanner(self.notes, self.midifi_toggle_active)
+            notes = realize_track_tremolo_spanner(self.notes, self.midifi_toggle_active)
+        elif self.midifi_toggle_active and "Trill" in self.label:
+            notes = realize_track_trills(self.notes, midifi_config)
+        else:
+            notes = self.notes
 
-        if not self.midifi_toggle_active:
-            return self.notes
-        return realize_track_trills(self.notes, midifi_config)
+        if midifi_config.arpeggio_enabled:
+            notes = realize_track_arpeggio(notes, midifi_config.arpeggio_delay_per_note)
+
+        return notes
 
     @property
     def natural_key(self):

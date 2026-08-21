@@ -8,6 +8,8 @@ rather than per-note marks.
 """
 
 import copy
+import re
+import xml.etree.ElementTree as ET
 
 from music21 import converter, interval, key, stream
 
@@ -74,6 +76,243 @@ ARTIFICIAL_HARMONIC_TRANSPOSITIONS = {
 }
 
 
+def _split_part_id(part_id):
+    """Given a music21 Part's .id, which follows the
+    "{raw_id}-Staff{N}" naming convention whenever music21 has split a
+    single multi-staff MusicXML <part> into separate Part objects -
+    confirmed directly against real data (no dedicated attribute
+    exposes this; this naming convention is the only observable
+    signal) - returns (raw_part_id, staff_number) as strings.
+
+    If the id doesn't match this pattern (a part that was never
+    split, single-staff), returns (part_id, '1') - matching the
+    default <staff> value MusicXML itself implies when a part has
+    just one staff and doesn't bother tagging notes with an explicit
+    <staff> element at all.
+    """
+    match = re.match(r'^(.+)-Staff(\d+)$', part_id)
+    if match:
+        return match.group(1), match.group(2)
+    return part_id, '1'
+
+
+def _extract_arpeggio_directions_from_xml(file_path):
+    """Parse the raw MusicXML file directly (bypassing music21's own
+    Score object entirely) to correctly recover per-event arpeggio
+    direction.
+
+    Necessary because of a real, confirmed music21 parsing limitation,
+    not a hypothetical one: when multiple <arpeggiate> elements share
+    the same "number" attribute - which MuseScore's export always
+    does, regardless of how many logically distinct arpeggios actually
+    exist, confirmed directly in real exported XML - music21's
+    importer reuses the FIRST spanner it created for that number and
+    silently discards every subsequent occurrence's own direction
+    attribute (confirmed directly in music21's own source,
+    musicxml/xmlToM21.py: arpeggioType is only ever applied when
+    CREATING a new spanner, never when an existing one is found and
+    reused). Direction data for anything but the very first arpeggio
+    in a part is genuinely, permanently lost by the time parsing
+    finishes - there is no way to recover it from the parsed Score
+    object at all, only from the raw file.
+
+    Returns {(raw_part_id, staff_number): [direction_or_None, ...]} in
+    document order - one entry per arpeggio-marked note/chord GROUP
+    (a chord's several consecutive <note> elements, sharing the same
+    marking, collapsed into one entry - matching how music21
+    represents a chord as one object, not several). direction is the
+    literal MusicXML value ('up', 'down', 'non-arpeggio') or None if
+    no direction attribute was given at all (meaning genuinely
+    unspecified - the decision to default that to 'up' belongs to the
+    caller, not this extraction step).
+
+    Also checks for <non-arpeggiate> - a genuinely DIFFERENT XML
+    element (not an <arpeggiate> with some direction value), used to
+    mark a chord that should explicitly NOT be rolled, in contrast to
+    surrounding chords that should. A real gap this fixes: an earlier
+    version of this function only ever searched for <arpeggiate>,
+    meaning a <non-arpeggiate>-marked chord would have been silently
+    invisible to this extraction and defaulted to a normal 'up' roll
+    by the caller - never caught because none of the real test files
+    used so far happen to contain one.
+    """
+    tree = ET.parse(file_path)
+    root = tree.getroot()
+
+    result = {}
+    for part_el in root.findall('part'):
+        part_id = part_el.get('id')
+        for measure_el in part_el.findall('measure'):
+            group_staff = None
+            group_has_arpeggio = False
+            group_direction = None
+            group_started = False
+
+            for note_el in measure_el.findall('note'):
+                is_chord_continuation = note_el.find('chord') is not None
+                staff_el = note_el.find('staff')
+                staff_number = staff_el.text if staff_el is not None else '1'
+                arp_el = note_el.find('notations/arpeggiate')
+                non_arp_el = note_el.find('notations/non-arpeggiate')
+
+                if not is_chord_continuation:
+                    if group_started and group_has_arpeggio:
+                        key_tuple = (part_id, group_staff)
+                        result.setdefault(key_tuple, []).append(group_direction)
+                    group_staff = staff_number
+                    if non_arp_el is not None:
+                        group_has_arpeggio = True
+                        group_direction = 'non-arpeggio'
+                    else:
+                        group_has_arpeggio = arp_el is not None
+                        group_direction = arp_el.get('direction') if arp_el is not None else None
+                    group_started = True
+                elif not group_has_arpeggio:
+                    if non_arp_el is not None:
+                        group_has_arpeggio = True
+                        group_direction = 'non-arpeggio'
+                    elif arp_el is not None:
+                        group_has_arpeggio = True
+                        group_direction = arp_el.get('direction')
+
+            if group_started and group_has_arpeggio:
+                key_tuple = (part_id, group_staff)
+                result.setdefault(key_tuple, []).append(group_direction)
+
+    return result
+
+
+def resolve_arpeggio_groups(score, file_path):
+    """Score-level pass (unlike every other resolve_* pass here, which
+    runs per-Part) - arpeggio detection genuinely needs to see
+    MULTIPLE parts at once, since a grand-staff arpeggio spans two
+    separate music21 Part objects (music21 splits a single multi-staff
+    MusicXML <part> into one Part per staff).
+
+    Two real, confirmed problems solved here, not hypothetical ones:
+
+    1. MuseScore exports every <arpeggiate> with the same "number"
+       attribute regardless of how many logically distinct arpeggios
+       exist, which makes music21 incorrectly merge UNRELATED
+       arpeggios (even across completely different measures) into one
+       spanner object - confirmed directly against a real file, where
+       one spanner incorrectly bundled a measure-5 chord together with
+       two unrelated measure-9 events. Worked around by ignoring the
+       spanner's own grouping entirely, and instead reconstructing the
+       TRUE groups by clustering arpeggio-tagged notes/chords that
+       share the same part-absolute offset (via getOffsetInHierarchy,
+       not raw .offset - the same measure-relative-offset trap already
+       paid for once during tremolo spanner work) WITHIN the same
+       original multi-staff part (matched via the raw part id prefix
+       from _split_part_id, not partName - partName alone could
+       incorrectly merge two same-named instruments, e.g. two harps,
+       if their arpeggios happened to land at the same offset).
+
+    2. The same MuseScore export quirk means music21 also loses
+       per-event arpeggio DIRECTION beyond the first occurrence in
+       each part (see _extract_arpeggio_directions_from_xml for the
+       full explanation). Recovered by reading the raw XML directly,
+       then correlating it back to the parsed notes POSITIONALLY -
+       matching raw-XML occurrence order, per (raw part id, staff),
+       against the same order arpeggio-tagged elements are naturally
+       encountered when scanning the corresponding music21 Part -
+       since music21's split-part naming convention is the only
+       available signal tying a split Part back to its original raw
+       part+staff.
+
+    Stores a fully self-contained plain dict directly on each
+    arpeggio-tagged note/chord as .mididivisi_arpeggio_info - pitches,
+    velocity, and articulations captured as plain data now, not left
+    as live object references - the same "resolve once, at parse time,
+    before anything downstream could depend on a live reference"
+    pattern already used for tremolo spanner, and for the same reason:
+    avoids any future dependency on spanner references that export has
+    already been confirmed to corrupt, and avoids recomputing
+    detection logic repeatedly.
+
+    A direction not explicitly specified in the source defaults to
+    'up' - explicit instruction, not an assumption: a real harp roll
+    with no direction marking is conventionally read bottom-to-top.
+    """
+    raw_directions = _extract_arpeggio_directions_from_xml(file_path)
+    raw_direction_cursors = {key_tuple: 0 for key_tuple in raw_directions}
+
+    events = {}  # (raw_part_id_prefix, offset) -> [(part, element), ...]
+
+    for part in score.parts:
+        raw_part_id, _ = _split_part_id(part.id)
+        for n in part.flatten().notesAndRests:
+            if not (n.isNote or n.isChord):
+                continue
+            spanners = [sp for sp in n.getSpannerSites() if sp.__class__.__name__ == "ArpeggioMarkSpanner"]
+            if not spanners:
+                continue
+
+            abs_offset = round(n.getOffsetInHierarchy(part), 6)
+            event_key = (raw_part_id, abs_offset)
+            events.setdefault(event_key, []).append((part, n))
+
+    for event_key, members in events.items():
+        directions_found = []
+        for part, element in members:
+            raw_part_id, staff_number = _split_part_id(part.id)
+            direction_key = (raw_part_id, staff_number)
+            cursor = raw_direction_cursors.get(direction_key, 0)
+            direction_list = raw_directions.get(direction_key, [])
+            if cursor < len(direction_list):
+                directions_found.append(direction_list[cursor])
+                raw_direction_cursors[direction_key] = cursor + 1
+            else:
+                directions_found.append(None)
+
+        explicit_direction = next((d for d in directions_found if d is not None), None)
+        direction = explicit_direction or 'up'
+
+        info = {
+            "direction": direction,
+            "offset": event_key[1],
+            "members": [
+                {
+                    "pitches": [p.midi for p in element.pitches] if element.isChord else [element.pitch.midi],
+                    "velocity": element.volume.velocity,
+                    "articulations": copy.deepcopy(element.articulations),
+                    "duration": element.duration.quarterLength,
+                    "part_id": part.id,
+                }
+                for part, element in members
+            ],
+        }
+        # Which member is "primary" (index 0, by score.parts iteration
+        # order - a natural, deterministic default, no extra logic
+        # needed) matters downstream: for a cross-staff event, only
+        # the primary member's track emits the FULL combined roll on
+        # toggle; every other member's track contributes nothing for
+        # that moment (already covered by the primary's emission) -
+        # see session.realize_track_arpeggio. Stored directly on each
+        # note (not just in the shared info dict, which holds plain
+        # data, not live object references) so that function can tell
+        # which note it's looking at without needing identity
+        # comparison against non-object data.
+        for i, (part, element) in enumerate(members):
+            element.mididivisi_arpeggio_info = info
+            element.mididivisi_arpeggio_is_primary = (i == 0)
+            # Only the PRIMARY member gets the shared "Midifi+" label
+            # marker (see get_note_level_label, which already checks
+            # for this exact attribute - reused directly, not a new
+            # mechanism) - deliberately NOT the secondary member(s),
+            # since their own track's contribution gets absorbed into
+            # the primary's output when realized, not realized on its
+            # own. Labeling it "Midifi+X" too would be misleading -
+            # implying ITS OWN track will produce a roll, when
+            # realization would actually just drop that note
+            # entirely, not emit anything from it. 'non-arpeggio'
+            # marked chords are also excluded, deliberately - they
+            # will never be realized regardless of the global setting,
+            # so they should never get a "will be realized" label.
+            if i == 0 and direction != "non-arpeggio":
+                element.mididivisi_midifi_source = "arpeggio"
+
+
 def load_score(file_path, midifi_config=None):
     """Parse a MusicXML file, convert it to sounding (concert) pitch,
     resolve artificial harmonics to their real sounding pitch, resolve
@@ -101,6 +340,8 @@ def load_score(file_path, midifi_config=None):
         resolve_tremolo_midifi(part, config)
         resolve_tremolo_spanner_boundaries(part)
         apply_dynamics_to_part(part)
+
+    resolve_arpeggio_groups(score, file_path)
 
     return score
 
@@ -484,6 +725,23 @@ def get_note_level_label(n):
             labels.append(f"Tremolo-{size.name}" if size is not None else cls)
         elif cls == "Glissando":
             labels.append(cls)
+        # ArpeggioMarkSpanner deliberately does NOT contribute a label
+        # here, unlike Trill/TremoloSpanner - arpeggio has no known
+        # sample-library patch case that would ever want a per-track
+        # opt-out (unlike trill's timpani-style rolls or tremolo
+        # spanner's 3rd-interval patches), so there's no reason to
+        # split arpeggio-marked notes into their own group at all.
+        # They stay in whatever group their base articulation already
+        # belongs to (e.g. "Sustain") - realization is instead gated
+        # by one global setting (MidifiConfig.arpeggio_enabled) and
+        # applied directly by content (mididivisi_arpeggio_info),
+        # regardless of which label a track happens to carry. See
+        # session.Track.get_active_notes and DEVLOG.md for the full
+        # reasoning - this was a real redesign after the original
+        # per-row-checkbox approach turned out to conflict with
+        # merging (a checkbox tied to a dedicated "Arpeggio" label
+        # would vanish whenever that label's group got merged with a
+        # differently-labeled one, e.g. "Sustain").
 
     seen = []
     for label in labels:

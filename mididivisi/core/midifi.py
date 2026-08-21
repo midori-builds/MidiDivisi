@@ -68,10 +68,34 @@ class MidifiConfig:
         # just the one parameter being tackled first.
         self.trill_notes_per_quarter = 8
 
+        # Arpeggio roll rate, expressed as DELAY per successive note
+        # (in quarterLength, tempo-relative - same principle as trill,
+        # different unit) rather than trill's "notes per quarter" -
+        # arpeggio's note count is already fixed by the chord, so
+        # there's no count to solve for the way trill's invented-from-
+        # nothing notes needed one; what needs setting is only the
+        # stagger between each note's onset. Default 0.125 (a 32nd
+        # note) - a reasonable general-purpose starting point, matching
+        # trill's own "pick something sensible, make it adjustable"
+        # approach. Curve shape (linear/log/exponential) is a further-
+        # out idea, deliberately not built yet - see BACKLOG.md.
+        self.arpeggio_delay_per_note = 0.125
+
+        # Global on/off for arpeggio realization - deliberately NOT a
+        # per-track toggle the way trill/tremolo spanner have one.
+        # There's no known sample-library case where a per-passage
+        # opt-out would matter for arpeggio (unlike trill's timpani-
+        # style rolls or tremolo spanner's 3rd-interval patches), so
+        # one global decision covers every real case. Defaults to off,
+        # matching every other midi-fy feature's own default.
+        self.arpeggio_enabled = False
+
     def to_dict(self):
         return {
             "tremolo_min_unmeasured_flags": self.tremolo_min_unmeasured_flags,
             "trill_notes_per_quarter": self.trill_notes_per_quarter,
+            "arpeggio_delay_per_note": self.arpeggio_delay_per_note,
+            "arpeggio_enabled": self.arpeggio_enabled,
         }
 
     @classmethod
@@ -100,6 +124,21 @@ class MidifiConfig:
         config.trill_notes_per_quarter = data.get(
             "trill_notes_per_quarter", cls().trill_notes_per_quarter
         )
+        # Same reasoning as trill's rate above - arpeggio's toggle is
+        # also per-note, on demand, so there's no "silently changes
+        # already-reconstructed data" risk to guard against here.
+        config.arpeggio_delay_per_note = data.get(
+            "arpeggio_delay_per_note", cls().arpeggio_delay_per_note
+        )
+        # Same reasoning as trill's rate and arpeggio's own delay
+        # above - genuinely safe to just match the live default, no
+        # deliberately-different fallback needed the way tremolo's
+        # threshold required. An old session (predating arpeggio, or
+        # even predating this specific enable flag) never had any
+        # arpeggio realized regardless of what this defaults to,
+        # since it's a live, on-demand decision, not baked into
+        # already-parsed note data.
+        config.arpeggio_enabled = data.get("arpeggio_enabled", cls().arpeggio_enabled)
         return config
 
 
@@ -210,6 +249,61 @@ def collapse_tremolo_spanner_to_base(first_pitches_midi, total_duration):
     if total_duration <= 0:
         return []
     return [(tuple(first_pitches_midi), 0, total_duration)]
+
+
+def realize_arpeggio_notes(pitches_midi, total_duration, delay_per_note, direction='up'):
+    """PURE function - given a flat list of MIDI pitch numbers already
+    collected from every staff/chord involved in one arpeggio event
+    (duplicates not yet removed), the chord's total written duration,
+    and a roll rate (delay between successive notes' onsets, in
+    quarterLength - tempo-relative, same principle as trill's rate:
+    stays musically consistent across tempo changes rather than a
+    fixed real-world time value), returns a list of (pitch_midi,
+    onset_offset, duration) tuples for the staggered roll.
+
+    Deliberately NOT trill/tremolo spanner's shape: those divide a
+    total duration into equal pieces. Arpeggio's note count is already
+    fixed by the chord (there's nothing to invent), so what needs
+    computing is only each note's ONSET delay - every note still
+    rings out to the SAME original release point, matching how a real
+    harp/piano roll actually sounds. Confirmed directly with the user
+    this is the intended behavior, not assumed from trill's different
+    shape of problem.
+
+    Exact-duplicate pitches (the same MIDI number occurring more than
+    once - e.g. doubled across two staves in a grand-staff roll) are
+    merged into a single roll-step rather than triggered twice, which
+    would be an ambiguous/retriggering double note-on at the identical
+    pitch a real harp string can't physically produce twice at once
+    anyway.
+
+    direction='up' (the default when a source score doesn't specify
+    one - matches real notational convention) sorts ascending, lowest
+    pitch first; 'down' sorts descending. 'non-arpeggio' marked chords
+    are NOT a roll at all and should never reach this function -
+    callers are responsible for that check before calling.
+
+    Real edge case worth being aware of, not silently hidden: an
+    aggressive roll rate (large delay) on a chord with many notes and
+    a short total_duration can push a later note's onset at or past
+    the chord's own written end - such notes are dropped entirely
+    (there's nothing left for them to sound) rather than emitted with
+    zero or negative duration.
+    """
+    if total_duration <= 0 or delay_per_note < 0:
+        return []
+
+    unique_pitches = sorted(set(pitches_midi), reverse=(direction == 'down'))
+
+    result = []
+    for i, pitch in enumerate(unique_pitches):
+        onset = i * delay_per_note
+        duration = total_duration - onset
+        if duration <= 0:
+            continue
+        result.append((pitch, onset, duration))
+
+    return result
 
 
 def resolve_tremolo_midifi(part, config):

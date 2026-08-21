@@ -1695,3 +1695,697 @@ this was a pure additive labeling change, not a behavior change to
 anything downstream yet (the actual on/off toggle, and the off-
 state's collapse-to-one-sustained-note behavior, are separate, not-
 yet-built work - see BACKLOG.md for the full agreed design).
+
+## Tremolo spanner - DONE
+
+Built in 3 deliberate steps (shorter than trill's 4 - no rate
+ambiguity to solve here, flag count already fully determines the
+realization) - each step fully tested and delivered before the next
+began.
+
+- **Tremolo spanner (measured 2-note/chord tremolo).** (1) pure
+  realization logic; (2) wiring into the non-destructive toggle
+  architecture, generalized beyond what trill needed; (3) tree UI
+  toggle - matching trill's mechanism exactly, no dialog/rate-config
+  step needed given flag count already fully determines the
+  realization.
+
+  **Correction to an earlier claim in this same entry**: previously
+  described the CURRENT (pre-toggle) export behavior as "overriding
+  both notes' pitch to the lower of the pair, keeping the original
+  written rhythm" - checked the actual code before starting step 2 and
+  found this placeholder was never actually implemented anywhere in
+  the codebase (searched parser.py, exporter.py, and the whole repo
+  for any TremoloSpanner pitch-manipulation logic - none exists).
+  Confirmed directly what ACTUALLY happens today for a track that
+  hasn't had the new toggle wired in: notes export exactly as written,
+  both sides at their real, distinct pitches with the original
+  rhythm - not collapsed to one pitch at all. This was a second
+  instance of trusting an earlier written claim without re-verifying
+  it (the first being the "labels already carry interval info"
+  mistake corrected earlier) - worth naming as a pattern to watch for,
+  not just fixing quietly.
+
+  **Interval detection - DONE.** `get_tremolo_spanner_interval()` in
+  `parser.py` (mirroring `get_trill_interval`, but genuinely simpler:
+  a tremolo spanner's two pitches are BOTH directly written in the
+  score, no key-signature inference needed like trill required).
+  Labels now read e.g. "Tremolo-M3"/"Tremolo-m3" instead of a bare
+  "TremoloSpanner" - verified against real data across 3 different
+  instruments in `Mysterious_Journey...musicxml` (Piccolo, Harp,
+  Viola - all real intervals found were 3rds, directly matching a
+  real case: some owned libraries have dedicated 3rd-interval trill
+  patches that DON'T want to be midi-fied, a decision that needs to
+  see the interval to be possible at all). Chord-to-chord case
+  verified via direct construction (no real test file has one): uses
+  each side's FIRST pitch, correctly handles chords with MISMATCHED
+  note counts (e.g. a 2-note chord to a 3-note chord), same result
+  regardless of which side of the spanner is queried from.
+
+  **Step 1 - DONE.** Two pure functions in `core/midifi.py`:
+  `realize_tremolo_spanner_notes()` (ON-state - alternates between the
+  spanner's two sides for 2^flag-count total slots, evenly dividing
+  the total duration - the SAME "N flags → 2^N notes" relationship
+  already proven for single-note tremolo, generalized to accept a
+  LIST of pitches per slot so both note-to-note and chord-to-chord,
+  even with mismatched note counts, are handled by one function) and
+  `collapse_tremolo_spanner_to_base()` (OFF-state - one sustained note/
+  chord at the first-written side's pitch(es), spanning the full
+  duration - given its own named function rather than an inline one-
+  liner, since unlike trill this state is a real transformation, not
+  a no-op).
+
+  **Step 2 - DONE.** `realize_track_tremolo_spanner()` in
+  `session.py` (same location as trill's wiring, same circular-import
+  reason) wires the two pure functions to real track data: finds each
+  spanner's two written sides (both appear as separate entries in a
+  track's notes; processed once, via the spanner object's own
+  identity, with the second side's entry dropped once absorbed into
+  the result), and outputs are ALWAYS a music21 Chord - even for a
+  single pitch - confirmed directly this exports identically to a
+  plain Note (same note_on/note_off pair), and it avoids needing to
+  switch between Note and Chord shapes depending on how many pitches
+  a given slot has, which trill's deepcopy-then-mutate approach can't
+  safely do when the shape itself needs to change. Velocity and
+  articulations are copied from whichever original side (by
+  alternation parity) each output slot corresponds to.
+
+  `Track.get_active_notes()` now dispatches by content type rather
+  than a single toggle-on/toggle-off branch: tracks labeled
+  "Tremolo-" (with an interval) always compute one of the two real
+  transformations regardless of toggle state, matching the
+  architectural generalization flagged as needed before this step
+  started; everything else keeps trill's original simpler behavior
+  (off = untouched originals, on = realize). Verified this
+  generalization didn't disturb trill's own behavior at all - still
+  returns the literal same object when off, still realizes correctly
+  when on.
+
+  Verified thoroughly against real data: the real F6/A6 3-flag
+  spanner (2 spanners total in that group) correctly collapses to 2
+  sustained notes with the CORRECT inherited velocity (33 - verified
+  directly against the originals, a genuinely soft passage, not a
+  bug) when off, and correctly produces 16 alternating notes summing
+  to the exact original total duration when on - confirmed through
+  the FULL export pipeline (real note_on counts in actual MIDI
+  output), not just the data layer. Chord-to-chord with mismatched
+  sizes verified through the full wiring too (not just the pure
+  function from step 1) - correct pitches, correct per-side velocity,
+  correct alternation. Full regression clean across all three real
+  files, and confirmed trill's own toggle behavior is completely
+  unaffected by this generalization.
+
+  Also added `get_tremolo_spanner_boundary()` in `parser.py` - given a
+  note/chord in a spanner, determines its two sides in TEMPORAL
+  (offset) order (sorted explicitly, not trusting
+  `getSpannedElements()`'s own list order to already match temporal
+  order), the total duration, and the flag count. Uses
+  `getOffsetInHierarchy()` rather than raw `.offset` deliberately - a
+  lesson already paid for once during divisi work (raw `.offset` can
+  be relative to an intermediate container like a Voice, not the
+  whole Part). Confirmed directly that raw `.offset` already happened
+  to match the part-absolute value for every real spanner note
+  checked here (none are Voice-nested, and confirmed separately that
+  no real tremolo spanner in any test file crosses a measure barline
+  either) - but used the hierarchy-aware method anyway, since it costs
+  nothing and removes the risk entirely rather than relying on that
+  holding true in general.
+
+  Verified thoroughly: both pure functions tested in isolation
+  (correct counts, correct alternation, mismatched chord sizes,
+  correct duration-fit, zero/negative-duration edge cases), AND the
+  full chain end to end against real data (found a real F6/A6, 3-flag,
+  whole-note-duration tremolo spanner in Piccolo, correctly produced
+  8 alternating notes summing to the exact original duration for ON,
+  and the exact single sustained note for OFF). Full regression across
+  all three real files confirmed unaffected - this step only added
+  new, unused-so-far functions, no existing behavior touched yet.
+
+  **Step 3.** Tree UI toggle - same per-row checkbox mechanism as
+  trill, no separate dialog section needed (no rate to configure,
+  confirmed in step 1). Renamed the shared handler from
+  `on_trill_midifi_toggled` to `on_midifi_toggled`, since it's now
+  generic across content types - what happens on toggle (flip the
+  flag, refresh the tree) is identical regardless of which content
+  type owns the row; it's `Track.get_active_notes()` that knows how
+  to interpret the flag differently per type. Detection extended from
+  `"Trill" in label` to also check `"Tremolo-" in label` (with the
+  dash, correctly excluding bare single-note "Tremolo"). Tooltip text
+  branches by content type - trill's off state needs no explanation
+  (it's just untouched), but tremolo spanner's off state is ALSO a
+  real transformation, so the tooltip says so explicitly rather than
+  implying the checkbox does nothing when unchecked.
+
+  **A real, serious bug found during step 3 testing, not a
+  theoretical edge case - caught by testing the actual real-world
+  usage pattern (toggle, export, toggle again) rather than stopping at
+  "toggle once and check the result."** Confirmed directly: after a
+  session had been exported even ONCE with a tremolo spanner's
+  alternating (ON) realization active, the SAME original notes'
+  `getSpannerSites()` no longer found their TremoloSpanner at all
+  afterward - something in music21's own MIDI-writing process strips
+  that bookkeeping from notes reachable from the stream being written.
+  This meant toggling OFF again after having exported while ON would
+  silently fall back to the ORIGINAL, un-collapsed notes (4, not the
+  correct 2) - a real correctness bug that would have affected any
+  user who exported even once with the toggle on, permanently breaking
+  that same passage's ability to be correctly toggled again in that
+  session.
+
+  Diagnosed methodically, not by guessing: first ruled out a stale-
+  widget-reference test artifact (confirmed the checkbox WAS a fresh
+  object across the rebuild, so that wasn't it), then traced boundary
+  detection at every single step of the sequence and found the exact
+  point of divergence (present before export, gone immediately after),
+  then confirmed via a control test that export WITHOUT ever touching
+  the toggle leaves boundaries intact - narrowing the cause to
+  something specific about the ON-state realization path interacting
+  with export, not a general "export corrupts everything" issue. Also
+  caught and corrected a genuine bug in my OWN test code along the way
+  (a reversed `zip()` unpacking that silently produced a wrong value
+  instead of an error) - initially mistaken for explaining the whole
+  discrepancy, until a more carefully-written test proved the
+  underlying application bug was still real regardless.
+
+  **Fix**: stopped relying on live spanner detection at
+  realization time entirely. Added
+  `parser.resolve_tremolo_spanner_boundaries()`, a new parse-time pass
+  (wired into `load_score()`, alongside the other resolve_* passes)
+  that runs ONCE, while the live spanner/note graph is still
+  guaranteed intact, and stores a fully self-contained plain dict
+  directly on both of a spanner's notes - both sides' MIDI pitches,
+  velocity, AND articulations (not just pitches - the same
+  live-object-dependency problem would have applied to those too),
+  plus total duration, flag count, and starting offset.
+  `realize_track_tremolo_spanner()` rewritten to read this stored
+  attribute instead of calling `get_tremolo_spanner_boundary()` live -
+  ordinary Python data can't be affected by whatever export does to
+  the live music21 object graph, sidestepping the whole question of
+  WHY export strips that bookkeeping rather than needing to fully
+  resolve music21's internal cause.
+
+  Verified the fix directly against the exact failing sequence:
+  toggle on → export (16 notes, correct) → toggle off → export (2
+  notes, now correctly collapsed, previously wrongly 4) → toggle on
+  again (16 notes, still correct) - confirming genuinely repeated
+  cycling works, not just a one-off recovery. Re-verified the chord-
+  to-chord case through the new architecture too (not just the
+  original wiring), confirmed trill's own toggle is completely
+  unaffected, and full regression clean across all three real files.
+
+
+## Arpeggio detection
+
+User provided a purpose-built real test file (a harp piece with
+single-staff and grand-staff arpeggios, glissandos, and pedal
+notation), specifically to validate detection before any realization
+work started - a genuinely good call, since detection turned out to
+be substantially harder than trill or tremolo spanner, both of which
+could rely on music21's own object model directly.
+
+**Root cause of the real difficulty, confirmed by reading music21's
+own import source, not guessed at**: MuseScore exports every
+`<arpeggiate>` element with `number="1"`, regardless of how many
+distinct arpeggios actually exist in the piece. That number attribute
+is exactly what the MusicXML spec uses to group simultaneous
+arpeggios into one spanner - so music21, correctly following spec,
+ends up merging every arpeggio in a part that shares that number into
+one `ArpeggioMarkSpanner`, even across completely unrelated measures.
+Confirmed directly against the user's file: one spanner incorrectly
+bundled a measure-5 chord together with two distinct measure-9 events
+four measures later.
+
+Worse, found while investigating direction specifically: music21's
+importer only ever applies the `direction` attribute when CREATING a
+brand-new spanner for a given number - every subsequent `<arpeggiate
+number="1">` in the same part just gets appended to the existing
+spanner via `addSpannedElements()`, with its own direction silently
+discarded. Verified this is a real, permanent data-loss, not just
+hard to find: added a `direction="down"` arpeggio to a fresh test file
+specifically to confirm this, and the parsed Score object had no trace
+of it anywhere - not on the note, not on the spanner, nowhere.
+
+**Fix required two real, separate workarounds, not one:**
+
+1. **True grouping**: ignore the spanner's own (broken) element list
+   entirely. Instead, cluster arpeggio-tagged notes/chords across all
+   parts by (original multi-staff part identity, part-absolute
+   offset) - using `getOffsetInHierarchy()` rather than raw `.offset`
+   (the same measure-relative-offset trap already paid for once
+   during tremolo spanner work - confirmed this file hits it too).
+   Grouped by the RAW part id prefix (via a new `_split_part_id()`
+   helper, parsing music21's own `"{raw_id}-Staff{N}"` split-part
+   naming convention - no dedicated attribute exposes this directly,
+   confirmed by checking) rather than `partName`, deliberately - two
+   different instruments sharing a display name (e.g. two harps)
+   could otherwise get incorrectly merged if their arpeggios happened
+   to land at the same offset. Verified this reconstruction against
+   the real file: correctly separates it into the true 3 events
+   (1 single-staff, 2 cross-staff), not the 1 incorrectly-merged
+   spanner music21's own parsing produced.
+
+2. **True direction**: parse the raw MusicXML file directly via
+   `xml.etree.ElementTree` (matching the library already used
+   elsewhere in this codebase for the same reason - notation_
+   preview.py's raw-XML extraction), walking each part's measures and
+   notes in document order, collapsing a chord's several consecutive
+   `<note>` elements (a note without `<chord/>` starts a new group,
+   subsequent `<chord/>`-tagged notes belong to it) into one logical
+   entry per arpeggio marking - producing an ordered, per-(raw part
+   id, staff) list of directions. Correlated back to the parsed
+   music21 elements POSITIONALLY: each element consumes the next
+   unclaimed raw-XML direction for its own (raw part id, staff) key,
+   in the same order both were encountered. This is a genuine
+   assumption (that raw-XML and music21-traversal order match one-
+   to-one per staff) rather than a guaranteed structural fact - but
+   verified directly against the real test file rather than just
+   assumed to hold, and reads as extremely likely to hold in general
+   given how sequentially MusicXML and music21 both process notes.
+
+**Architecture**: a new score-level pass,
+`resolve_arpeggio_groups(score, file_path)` - the only resolve_* pass
+that runs once per score rather than once per part in `load_score()`'s
+pipeline, since cross-staff grouping genuinely needs to see multiple
+parts at once, unlike every other pass here. Stores a fully self-
+contained plain dict on each arpeggio-tagged note as
+`.mididivisi_arpeggio_info` - pitches (as MIDI numbers), velocity, and
+articulations captured as plain data at parse time, not left as live
+object references - deliberately applying the SAME lesson tremolo
+spanner already taught the hard way (a real bug where live spanner
+references got silently corrupted by export), rather than waiting to
+rediscover it. Runs after the per-part loop, specifically after
+`apply_dynamics_to_part` has already set every note's final velocity,
+so the captured velocity is correct dynamics-derived data, not a
+placeholder.
+
+Verified thoroughly against real data: the down-arp test file
+correctly resolves to exactly 3 events (measure 5 single-staff →
+'up', measure 9 first cross-staff event → 'up', measure 9 second
+cross-staff event → 'down' - correctly recovered despite the parsing
+bug), the original all-up file correctly resolves all 3 events to
+'up', and - found along the way, not specifically sought out - 6 real
+single-staff arpeggios in `Mysterious_Journey...musicxml` that hadn't
+been noticed in any prior session, all correctly detected and
+defaulting to 'up' as expected. Full regression clean across all five
+real test files (the three original plus both new harp files), and
+confirmed the new pass adds no meaningful overhead and doesn't affect
+files with zero arpeggio content at all.
+
+**Design decisions confirmed with the user before or during this
+work, not assumed:**
+- Roll rate will be exposed as delay-per-note (tempo-relative
+  quarterLength), not "notes per quarter" the way trill's rate is -
+  arpeggio's note count is already fixed by the chord, so there's no
+  count to solve for the way trill's invented-from-nothing notes
+  needed one.
+- A missing direction defaults to 'up' (bottom-to-top) - explicit
+  instruction, matching real notational convention.
+- Curve shape (linear/log/exponential) deferred exactly like trill's
+  speed shape, linear only for the MVP.
+- Staggered onsets, but the whole chord rings to its ORIGINAL written
+  release point - not compressed into a shorter total span the way
+  trill's alternation evenly divides its total duration. A real
+  design fork explicitly confirmed, not an assumption carried over
+  from trill's different shape of problem.
+
+Pure realization logic (`realize_arpeggio_notes()` in core/midifi.py)
+is now done too - deliberately a different shape from trill/tremolo
+spanner's "divide total duration into equal pieces": arpeggio's note
+count is already fixed by the chord, so only each note's ONSET delay
+needs computing, with every note still ringing to the same original
+release point. Also required going back and adding `duration` to each
+member's stored detection info (missed in the first pass - only
+pitches/velocity/articulations were captured initially, discovered
+while trying to test the realization function against real detected
+data end to end, not during detection itself). Verified in isolation
+(up/down sorting, exact-duplicate pitches across staves merged into
+one roll-step rather than double-triggered - a real harp string can't
+physically sound twice at once anyway, an aggressive roll rate
+correctly dropping notes that would end up with zero/negative
+duration rather than producing invalid output, zero-delay degrading
+gracefully to a plain simultaneous chord) and against the real
+detected down-direction cross-staff event from the test file, full
+regression clean across all five real files.
+
+**Non-destructive toggle wiring is done too.** Real architectural
+question surfaced before starting: unlike trill/tremolo spanner
+(single track, self-contained), a cross-staff arpeggio's two halves
+live in genuinely separate Instrument objects by default (checked
+directly - this app treats Harp Staff1/Staff2 as two separate
+Instruments, same as divisi top/bottom, until a user merges them).
+Raised this as a real design fork rather than picking silently: split
+the roll correctly across both original tracks (musically ideal, real
+added complexity around duplicate-pitch attribution), or have one
+"primary" track (whichever staff detection encountered first,
+arbitrary but deterministic) emit the full combined roll while the
+other's contribution for that moment is simply dropped - since a
+multi-track MIDI file plays every track simultaneously regardless of
+which one holds a given note, the final audible result is identical
+either way. User's actual concern was whether option 2 introduces any
+destructive editing - confirmed directly it doesn't: Track.notes on
+every involved track stays completely untouched regardless of which
+track ends up emitting the computed output, so toggling off instantly
+and exactly restores each track's own original note. Went with the
+simpler option once that was confirmed.
+
+Also discovered arpeggio-marked content had no dedicated label at
+all before this step - it was just falling into whatever base
+articulation label already applied (e.g. "Sustain"), unlike trill/
+tremolo spanner which both get their own label. Added "Arpeggio" to
+`get_note_level_label()`'s spanner-handling loop, deliberately
+WITHOUT direction in the label (unlike interval for trill/tremolo
+spanner, direction doesn't meaningfully change whether a passage
+should be midi-fied - it's a parameter within the realization, not a
+reason for different toggle behavior) and deliberately EXCLUDING
+'non-arpeggio'-marked chords (a bracket instead of a squiggly line,
+meaning "don't arpeggiate this one" - should just play as a normal
+chord, not get grouped into a toggle that would never apply to it).
+
+A real bug caught by reasoning through the design before testing it,
+not found empirically this time: an early draft of the wiring
+function computed each realized note's base offset by calling
+`getOffsetInHierarchy()` live, inside the on-demand realization
+function itself - the exact same live-object-dependency mistake
+tremolo spanner's export-corruption bug already taught was unsafe.
+Caught and fixed before ever running it: the offset is now captured
+once as plain data during detection (parser.resolve_arpeggio_groups
+already computes it for grouping purposes) and simply read back later,
+with zero dependency on the note still being correctly attached to
+its original stream by the time the toggle actually gets used.
+
+`MidifiConfig` gained `arpeggio_delay_per_note` (default 0.125, a
+32nd note - tempo-relative, matching trill's own rate philosophy),
+following the exact same from_dict fallback reasoning already
+established for trill's rate (safe to match the live default, since
+the toggle is per-note and on-demand, not session-wide and always-
+applied the way tremolo's threshold is).
+
+Verified end to end against real data: toggle off correctly returns
+untouched originals on both tracks (zero-cost, literal same objects);
+toggle on correctly shows the primary track (Staff1) absorbing the
+full combined roll (10 notes total across all three real arpeggio
+events, in the exact case-by-case order the pure function already
+proved correct - ascending for the two 'up' events, descending for
+the 'down' one) while the secondary track (Staff2) correctly emits
+nothing for that same moment. Confirmed through the actual export
+pipeline too, not just the data layer - both toggle states produce
+the correct real MIDI note_on counts. Re-verified trill is completely
+unaffected by the shared dispatch changes. Full regression clean
+across all five real test files.
+
+The tree UI toggle is the only remaining piece, not yet built.
+
+## Arpeggio - DONE
+
+Built in the same staged shape as trill/tremolo spanner (detection →
+pure realization → toggle wiring → tree UI toggle), each step fully
+tested before the next began - the full step-by-step history,
+including the real MuseScore export bugs found and fixed along the
+way, is captured in the sections above (arpeggio detection, and the
+"non-destructive toggle wiring is done too" continuation). Summary of
+what shipped and the design decisions confirmed along the way:
+
+- **Arpeggio - fully done, including the tree UI toggle.** No sample
+  library has an "arpeggio patch" -
+  needs to become real staggered note-on events, same non-destructive
+  toggle architecture as trill/tremolo spanner. Roll rate exposed as
+  delay-per-note (tempo-relative quarterLength, not "notes per
+  quarter" like trill - arpeggio's note count is already fixed by the
+  chord, so there's no count to solve for the way trill has). Curve
+  shape (linear/log/exponential) deferred exactly like trill's speed
+  shape - linear only for now. Confirmed design: staggered onsets, but
+  the WHOLE chord still rings to its original written release point
+  (not compressed into a shorter span the way trill's alternation
+  divides duration evenly) - `realize_arpeggio_notes()` in
+  `core/midifi.py` implements exactly this, verified in isolation
+  (up/down sorting, exact-duplicate pitches across staves correctly
+  merged into one roll-step rather than double-triggered, an
+  aggressive roll rate correctly dropping notes that would have zero/
+  negative duration rather than producing invalid output) and against
+  real detected data end to end (the real down-direction cross-staff
+  event from the test file, all notes correctly ringing to the exact
+  same original release point). Full detail in DEVLOG.md.
+
+  **Detection - DONE, and genuinely harder than trill/tremolo spanner
+  turned out to be**, due to a real MuseScore export quirk (not
+  music21's fault, and not hypothetical - confirmed directly against
+  real files): every `<arpeggiate>` element exports with the same
+  "number" attribute regardless of how many distinct arpeggios exist,
+  which makes music21 both (a) incorrectly merge unrelated arpeggios
+  across different measures into one spanner object, and (b) silently
+  discard direction data for every arpeggio after the first in a part
+  (confirmed in music21's own source - direction is only ever applied
+  when a NEW spanner is created, never when an existing one is reused).
+  Both fixed in a new score-level pass (`resolve_arpeggio_groups`,
+  the only resolve_* pass that runs once per score rather than once
+  per part - genuinely needs to see multiple parts at once for cross-
+  staff grouping): TRUE groups reconstructed by clustering arpeggio-
+  tagged notes/chords sharing the same part-absolute offset within the
+  same original multi-staff part (not partName, which could wrongly
+  merge two same-named instruments); direction recovered by reading
+  the raw XML directly and correlating it back positionally. Verified
+  against real data throughout, including a purpose-built test file
+  (`Harp_Test_-_down_arp.musicxml`) confirming a genuine cross-staff,
+  explicit-down-direction arpeggio is detected correctly, and 6 real
+  single-staff arpeggios found in `Mysterious_Journey...musicxml` that
+  hadn't been noticed before this work.
+
+  **Final step - tree UI toggle and rate exposure.** Same per-row
+  checkbox mechanism as trill/tremolo spanner, extended to a third
+  content type via a three-way tooltip branch (trill and arpeggio's
+  off state needs no explanation - both are genuinely untouched;
+  tremolo spanner's off state is a real transformation and the
+  tooltip says so). Unlike tremolo spanner, arpeggio DOES have a real
+  exposed rate (the delay-per-note), so it also got its own section in
+  the Midi-fy dialog, mirroring trill's rate control exactly -
+  confirmed directly that changing it applies instantly with no
+  rebuild warning, matching trill's rate and NOT tremolo's threshold.
+  Verified the complete toggle cycle through real UI clicks end to
+  end, correctly handling the stale-widget-reference risk from
+  `refresh_tree()` rebuilding the tree on every toggle (a lesson
+  already learned once for trill, applied here without needing to
+  rediscover it): both harp instances' checkboxes clicked on, correctly
+  producing the full 10-note combined roll on the surviving track;
+  clicked back off, correctly restoring the original 2-track, 10-note
+  split. Full regression clean across all five real test files.
+
+## Merged-group Midi-fy checkbox bug
+
+Real bug reported after actually using the shipped arpeggio feature:
+after merging a grand-staff Harp's two instruments together (Merge or
+Auto Merge, a routine, expected workflow for exactly this kind of
+instrument), the Arpeggio checkbox disappeared entirely, with no way
+left to toggle it.
+
+Root cause: the checkbox visibility check had required
+`not group.is_merged` since trill's very first implementation of this
+UI - a restriction that had always existed, silently carried forward
+unquestioned through tremolo spanner and arpeggio's own builds. Rather
+than assume why it was there, checked directly what merging actually
+does: confirmed `merge_instruments()` combines matching-label groups
+together (both instrument's "Arpeggio" groups become ONE group with
+two same-labeled tracks, not two differently-labeled ones bundled
+together) - meaning the ambiguity the restriction was presumably
+guarding against (what should one checkbox control if a merged group
+holds several DIFFERENT labels) never actually applied to this real
+case. The restriction was simply too broad, hiding the checkbox for
+an unambiguous case along with the genuinely ambiguous one it may have
+been written for.
+
+Fixed by replacing the `not group.is_merged` check with "do ALL tracks
+in this group share the same midi-fy-eligible label" - true regardless
+of merge status, and only ever false for the genuinely ambiguous case.
+`on_midifi_toggled()` now takes a LIST of tracks rather than a single
+one (an unmerged group just passes its own one-element list, so this
+is one code path for both cases), toggling every track in the group
+together. Checkbox state reflects "are ALL tracks currently on" -
+deliberately not a three-state partial indicator, which would be more
+precise for a mixed state but adds real complexity for something that
+shouldn't come up often in practice.
+
+Verified directly against the real harp file: checkbox correctly
+REMAINS present after merging both Harp instances (the exact bug
+being fixed), clicking it correctly toggles both underlying tracks
+together (confirmed via track state, not just the checkbox's own
+visual state), and the full export correctly reflects the toggled
+merged roll (10 notes, matching the pre-merge realized total exactly).
+Re-verified trill's original single-track, unmerged case still works
+unaffected. Full regression clean across all five real test files.
+
+## Arpeggio redesign - removed per-track checkbox and label entirely
+
+The merged-group checkbox fix above turned out to be treating a
+symptom, not the disease. User reported the real underlying problem
+after using the shipped feature further: arpeggio content ALSO needs
+to merge cleanly with a NEIGHBORING different-labeled group (e.g. an
+arpeggio passage merging with a "Sustain" group it's musically part
+of) - not just with another arpeggio-labeled group, which is what the
+earlier fix actually solved. A checkbox tied to a dedicated "Arpeggio"
+label has no coherent meaning once that label's group merges with a
+genuinely different one.
+
+First proposal (moving arpeggio to tremolo's parse-time, destructive
+architecture) was flatly - and correctly - rejected: this project has
+been explicit throughout about staying non-destructive, and the user
+directly pointed back at an EARLIER conversation (before any of the
+midi-fy toggle infrastructure existed) where retrofitting tremolo onto
+trill's non-destructive model was discussed and deliberately deferred,
+not abandoned. Proposing to move arpeggio backward onto tremolo's
+model was the wrong direction entirely.
+
+The actual fix, once framed correctly: arpeggio never needed its own
+label or group in the first place. The label existed ONLY to make
+per-row checkbox detection possible. Given the user's own separately-
+confirmed premise (no sample library has a dedicated arpeggio patch,
+unlike trill's timpani-style rolls or tremolo spanner's 3rd-interval
+patches), a per-track opt-out was never buying anything real - the
+decision is the same everywhere. Removing the "Arpeggio" label
+entirely means arpeggio-marked notes just stay within whatever group
+their base articulation already belongs to (e.g. "Sustain") from the
+moment Session.from_score() runs - there is no separate group left to
+ever need merging, by construction, rather than by a merge-time fix.
+
+Confirmed `merge_midifi_variants()` (tremolo's existing merge-back
+mechanism) was NOT needed here and would have been the wrong tool -
+that mechanism is for merging an ALREADY-SEPARATE "Midifi+X" group
+back into "X" after the fact; removing the arpeggio label avoids ever
+creating that separate group at all.
+
+**Architecture**: `Track.get_active_notes()` restructured so arpeggio
+is applied as an ADDITIONAL pass chained after whatever the label-
+based dispatch (trill/tremolo spanner) already produced, rather than
+being one branch of a single either/or dispatch - gated by a new
+global `MidifiConfig.arpeggio_enabled` flag, not a per-track
+`midifi_toggle_active` check. `realize_track_arpeggio()` was already
+safe to call this way without modification - it only ever touches
+notes actually carrying `mididivisi_arpeggio_info`, passing everything
+else through untouched, so chaining it after any other realization is
+always correct regardless of what that produced. Crucially, this
+KEEPS the on-demand, computed-fresh-every-call architecture - both the
+enable flag and the roll rate stay instantly adjustable, no rebuild
+needed, unlike tremolo's threshold. The per-row checkbox for arpeggio
+was removed from the tree entirely; the Midi-fy dialog gained a
+plain "Enable arpeggio midi-fy" checkbox alongside the existing rate
+control, confirmed neither triggers the rebuild-warning path.
+
+**A real, separate bug found and fixed while touching this code, not
+part of the redesign itself**: `_extract_arpeggio_directions_from_xml`
+never actually checked for `<non-arpeggiate>` - a genuinely different
+MusicXML element (not an `<arpeggiate>` with some direction value)
+used to mark a chord that should explicitly NOT be rolled, in contrast
+to surrounding chords that should. None of the real test files used so
+far happen to contain one, which is exactly why this went unnoticed
+until now. The exclusion check that referenced this ('non-arpeggio')
+existed in the code already, but could never actually fire, since
+nothing ever produced that value. Fixed by detecting `<non-
+arpeggiate>` directly alongside `<arpeggiate>`, and moved the actual
+exclusion check from the (now-deleted) labeling step into
+`realize_track_arpeggio` itself, where the real decision now lives.
+Verified with a purpose-built synthetic file, since no real test file
+exercises this.
+
+Verified thoroughly, including two real test-methodology traps caught
+and corrected before reporting anything as broken: an early check
+compared total `note_on` counts before/after enabling arpeggio and
+found them unexpectedly equal for the harp file - traced directly
+(not assumed) to a coincidental cancellation, where one track's gain
+from becoming the cross-staff primary exactly matched the other
+track's loss from becoming secondary; confirmed this was correct
+behavior, not a bug, by checking actual pitch content and per-track
+distribution instead of the misleading summed total. A second,
+similar false alarm on a different real file (`Mysterious_
+Journey...musicxml`, single-staff arpeggios only) - total count
+staying IDENTICAL turned out to be simply correct: realizing a chord
+into a staggered roll doesn't add notes, it only changes their onset
+timing, so an unchanged note count was actually the right result -
+confirmed by checking real onset offsets directly (a plain chord's
+notes sharing one offset vs. the realized version's five staggered
+offsets), not by continuing to assert on note count.
+
+Final verification confirmed: arpeggio-marked notes correctly stay
+inside "Sustain" from parse time (no "Harp - Arpeggio" group exists
+at all anymore); the global flag correctly gates realization on/off,
+instantly, for both the harp test file and a real orchestral file
+with different (single-staff) arpeggio content; merging is now a
+complete non-issue (checked directly, both before and after merging
+the two harp instruments, confirmed realization behaves identically
+either way, since there was never a separate group to be affected by
+merging); the dialog's new checkbox correctly applies instantly with
+no rebuild warning; trill's own checkbox mechanism is completely
+unaffected. Full regression clean across all five real test files.
+
+## Arpeggio - restoring the separate Midifi+ track (correcting a misread intent)
+
+The previous redesign entry above solved a real problem (per-track
+checkbox breaking on merge) but solved it by removing MORE than was
+actually asked for. User corrected this directly and firmly: "treat
+this like tremolo" meant literally, from the UI perspective - keep
+arpeggio-marked notes in their own separate, visible track (matching
+tremolo's own "Midifi+X" labeling convention exactly), make it
+mergeable via the existing "Merge Midi-fy" button or a regular manual
+merge, and let the user decide whether to merge it - not remove the
+separate track and fold arpeggio invisibly into its base articulation
+group, which is what actually got built. Worth being honest about:
+this was a real misread of "treat this like tremolo" as being about
+the underlying MODEL (which the user was NOT asking to copy) rather
+than the UI SHAPE (a separate, mergeable track) they specifically
+meant.
+
+While confirming the fix, user also corrected a second, longer-
+standing misunderstanding: tremolo's current destructive, parse-time
+model was never intended to be permanent. It was explicitly deferred -
+not abandoned - during the very first trill design conversation,
+specifically so the non-destructive pattern could be proven once on
+trill before migrating an already-working feature. That deferral had
+apparently been re-explained by the user multiple times since without
+ever landing as a clear, standalone commitment - it only ever existed
+as buried context in prior devlog entries, never as its own backlog
+item. Added one directly this time (see BACKLOG.md's "Midi-fy
+features" section) rather than let this keep needing to be re-raised.
+
+**The actual fix**: reused the EXACT existing `mididivisi_midifi_source`
+marker mechanism tremolo already uses for its own "Midifi+X" labeling
+(confirmed directly it's only ever checked for presence, never a
+specific value, so safe to set to "arpeggio" instead of "tremolo") -
+set only on the PRIMARY member of each arpeggio event in
+`resolve_arpeggio_groups` (parser.py), deliberately not on secondary
+members (a cross-staff event's non-primary track never produces its
+own realized output, so labeling it "Midifi+X" too would be
+misleading), and deliberately not on 'non-arpeggio'-marked chords
+(which will never be realized regardless of the global setting, so
+should never carry a "will be realized" label). No new labeling logic
+was needed at all - `get_note_level_label()`'s existing
+`mididivisi_midifi_source` check already handles the prefixing
+correctly once the marker is set on the right notes.
+
+One real semantic difference from tremolo worth being explicit about,
+raised proactively rather than discovered later: tremolo's own use of
+"Midifi+X" means the note has ALREADY been destructively realized by
+the time that label exists - the transformation already happened at
+parse time. Arpeggio's use of the same label means something subtly
+different: the note WILL BE realized if the global
+`arpeggio_enabled` setting is on - the underlying note stays
+completely untouched, computed fresh on demand exactly like trill,
+regardless of what its current label says. Confirmed with the user
+this difference is fine and intentional, not something to paper over -
+it's really tremolo's OWN meaning that's the outlier here, once
+tremolo itself gets migrated to match this same non-destructive
+pattern.
+
+Verified thoroughly against real data: the separate "Harp - Midifi+
+Sustain" track is back (3 notes on the primary instance, all 3 real
+arpeggio events on this file correctly attributed to Staff1 as
+primary); the secondary instance's "Sustain" correctly still contains
+all 43 of its own notes, including its 2 secondary-member arpeggio
+notes, unlabeled as intended; `Session.merge_midifi_variants()` (the
+existing "Merge Midi-fy" mechanism, confirmed generic and unmodified)
+correctly merges "Midifi+Sustain" into "Sustain"; realization still
+correctly works after that merge (same note counts already verified
+correct in earlier testing); a regular manual merge (selecting both
+groups directly, not using the Merge Midi-fy button) also works
+correctly, confirming this isn't tied to one specific merge mechanism.
+Re-verified the other real file with arpeggios (`Mysterious_
+Journey...musicxml`, single-staff only) correctly shows its own
+"Midifi+Sustain" track. Trill's own checkbox mechanism confirmed
+completely unaffected. Full regression clean across all five real
+test files.
