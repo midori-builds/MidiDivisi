@@ -142,6 +142,7 @@ class MainWindow(QMainWindow):
     def _build_menu_bar(self):
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("File")
+        file_menu.setFixedWidth(150)
 
         self.open_action = QAction("Import", self)
         self.open_action.triggered.connect(self.load_musicxml)
@@ -184,12 +185,14 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.settings_action)  # always enabled - not tied to a loaded score
 
         profiles_menu = menu_bar.addMenu("Profiles")
+        profiles_menu.setFixedWidth(125)
 
         profile_manager_action = QAction("Profile Manager", self)
         profile_manager_action.triggered.connect(self.open_profile_manager)
         profiles_menu.addAction(profile_manager_action)  # always enabled - not tied to a loaded score
 
         midifi_menu = menu_bar.addMenu("Midi-fy")
+        midifi_menu.setFixedWidth(90)
 
         self.midifi_dialog_action = QAction("Midi-fy...", self)
         self.midifi_dialog_action.triggered.connect(self.open_midifi_dialog)
@@ -197,6 +200,7 @@ class MainWindow(QMainWindow):
         midifi_menu.addAction(self.midifi_dialog_action)
 
         help_menu = menu_bar.addMenu("Help")
+        help_menu.setFixedWidth(78)
 
         about_action = QAction("About", self)
         about_action.triggered.connect(self.show_about_dialog)
@@ -324,8 +328,10 @@ class MainWindow(QMainWindow):
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Track", "Merged", "Profile", "KS", "Preview", "Midi-fy"])
         self.tree.setColumnWidth(COL_NAME, 450)
+        self.tree.setColumnWidth(COL_MERGED, 65)
         self.tree.setColumnWidth(COL_PROFILE, 170)
-        self.tree.setColumnWidth(COL_PREVIEW, 40)
+        self.tree.setColumnWidth(COL_KS, 35)
+        self.tree.setColumnWidth(COL_PREVIEW, 65)
         self.tree.setColumnWidth(COL_MIDIFI, 55)
         # Checkboxes are the selection mechanism here, not native row
         # highlighting - disable native selection so the two don't
@@ -721,7 +727,7 @@ class MainWindow(QMainWindow):
         # design discussion): a background color driven purely by
         # check state is simpler and can't drift out of sync with it,
         # since there's only ever one source of truth.
-        highlight = QColor(COLORS["accent"]) if checked else QColor(COLORS["bg_content"])
+        highlight = QColor(COLORS["row_selected"]) if checked else QColor(COLORS["bg_content"])
         text_color = QColor(COLORS["accent_text"]) if checked else QColor(COLORS["text"])
         for col in (COL_NAME, COL_MERGED):
             item.setBackground(col, highlight)

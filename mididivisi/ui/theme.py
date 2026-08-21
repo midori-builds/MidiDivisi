@@ -12,15 +12,17 @@ straightforward extension, not a rewrite.
 """
 
 COLORS = {
-    "bg_app": "#FAF6EE",
-    "bg_toolbar": "#F1EBDD",
-    "bg_content": "#FDFBF6",
-    "border": "#DDD4C2",
-    "text": "#2B2620",
-    "text_muted": "#8A8073",
-    "hover": "#EFE8D8",
-    "accent": "#3584E4",
+    "bg_app": "#20211F",
+    "bg_toolbar": "#292A27",
+    "bg_content": "#31322F",
+    "border": "#45453F",
+    "text": "#F0EDE5",
+    "text_muted": "#B9B5AA",
+    "hover": "#705F3D",
+    "accent": "#B79A62",
+    "row_selected" : "#574A2F",
     "accent_text": "#FFFFFF",
+    "test_color": '#FF0000'
 }
 
 
@@ -28,7 +30,7 @@ def build_stylesheet():
     c = COLORS
     return f"""
         QWidget {{
-            background: {c['bg_content']};
+            background: {c['bg_app']};
             color: {c['text']};
         }}
 
@@ -305,7 +307,8 @@ def build_stylesheet():
 
         QScrollBar:vertical {{
             background: {c['bg_app']};
-            width: 12px;
+            border: none;
+            width: 8px;
             margin: 0px;
         }}
 
