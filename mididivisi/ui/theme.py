@@ -22,7 +22,16 @@ COLORS = {
     "accent": "#B79A62",
     "row_selected" : "#574A2F",
     "accent_text": "#FFFFFF",
-    "test_color": '#FF0000'
+    "test_color": '#FF0000',
+    # Deliberately NOT part of the app's dark theme cascade - real
+    # sheet music notation (rendered by Verovio) is drawn in solid
+    # black, which the app's own dark background makes nearly
+    # illegible. This is a light, paper-like tone specifically for the
+    # notation display area in NotationPreviewWindow, applied directly
+    # to that one widget rather than through the global stylesheet, so
+    # every other part of that window (nav/zoom controls) stays on the
+    # normal dark theme.
+    "notation_bg": "#EFE9E4",
 }
 
 

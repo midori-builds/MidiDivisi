@@ -2389,3 +2389,70 @@ Journey...musicxml`, single-staff only) correctly shows its own
 "Midifi+Sustain" track. Trill's own checkbox mechanism confirmed
 completely unaffected. Full regression clean across all five real
 test files.
+
+## Notation preview blank for some instruments - real bug, root-caused and fixed
+
+User reported the notation preview intermittently showed nothing at
+all - Piccolo in `Mysterious_Journey...musicxml` and Harp in the harp
+test file both rendered blank, while other instruments worked fine.
+
+Diagnosed methodically rather than guessed at, each step confirmed
+directly before moving to the next: raw XML extraction had the
+expected note count; Verovio's own render also had the expected note-
+class elements; both survived our own post-processing steps
+unchanged. All of that looked fine, which pointed away from "content
+is missing" and toward "content exists but isn't actually rendering."
+Checked `QSvgRenderer.isValid()` directly rather than continuing to
+inspect the string - it was `False`. Qt's SVG parser was rejecting
+the document outright, silently falling back to a tiny 128x64 default
+widget size (not the SVG's own intrinsic ~2100x2970) - which is what
+actually made the preview appear blank, not any missing content.
+
+Root cause, found by checking whether the SVG was well-formed XML at
+all: it wasn't. `_flatten_text_labels`'s regex-based flattening (built
+earlier to fix a different, related Qt SVG quirk) produced a literal
+mismatched tag - a `<text>` opening tag closed by `</tspan>` - for one
+specific real element: the tempo marking "Andante moderato". Traced to
+its actual raw structure: unlike every previously-tested case (one
+run of nested wrapper tspans ending in one real content tspan), this
+tempo marking has TWO SIBLING wrapper groups inside the same outer
+`<text font-size="0px">` element - genuinely different runs of styled
+text, not one. The regex's `(?:</tspan>\s*)+</text>` tail correctly
+matched the FIRST run's closing tags but had no way to know a SECOND
+sibling group and the real `</text>` were still coming - a structural,
+tree-shaped ambiguity that a regex operating on linear text literally
+cannot resolve correctly in general, not a tunable edge case.
+
+**Fix**: rewrote `_flatten_text_labels` to operate on the parsed XML
+tree (`xml.etree.ElementTree`) instead of a regex over raw text -
+finds every real-content tspan (any font-size other than 0px) as a
+descendant of a font-size=0px `<text>` via `.iter()`, however many
+sibling runs exist, since parent/child/sibling relationships are read
+from the actual tree structure rather than inferred by scanning text
+linearly. Each real-content run becomes its own direct `<tspan>` child
+of the flattened `<text>` element, keeping its own font-size -
+correctly generalizes to both the single-run cases that already
+worked and the multi-run case that didn't, without losing per-run
+styling. Confirmed `_flatten_nested_svg` (the separate, earlier
+nested-<svg> fix) already produces clean, well-formed XML on its own,
+so it was safe to parse its output directly rather than needing a
+larger rewrite.
+
+Verified via `QSvgRenderer.isValid()` and `defaultSize()` directly
+(not just checking the string for well-formedness) that both reported
+cases now correctly report `isValid=True` with the real page size
+(2100x2970), matching the previously-working case exactly. Then swept
+EVERY instrument occurrence across all five real test files (58
+total) through the same real-Qt-renderer check, not just the two
+specifically-reported cases - confirmed zero failures, giving real
+confidence this fixes the general class of bug rather than patching
+around two specific instances. Full regression clean.
+
+A separate, lower-priority issue surfaced during this investigation,
+not the reported bug and not yet addressed: Qt logs repeated
+"link # is undefined!" warnings for every instrument tested,
+including ones that were already working correctly (isValid=True,
+correct size) - likely an unresolved `<use href="#...">` reference to
+a shared symbol definition Verovio emits. Doesn't affect validity or
+sizing, so left as a cosmetic follow-up rather than investigated
+further here.

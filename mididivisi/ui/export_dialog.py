@@ -70,12 +70,25 @@ class ExportDialog(QDialog):
         folder_row.addWidget(browse_button)
         layout.addLayout(folder_row)
 
-        # --- Filename row (Export All only) ---
+        # --- Filename row (Export only) ---
         filename_row = QHBoxLayout()
-        filename_row.addWidget(QLabel("File name (Export All):"))
+        filename_row.addWidget(QLabel("File name (Export):"))
         self.filename_edit = QLineEdit(default_filename)
         filename_row.addWidget(self.filename_edit, 1)
         layout.addLayout(filename_row)
+
+        # --- Select All / Deselect All ---
+        select_row = QHBoxLayout()
+        select_all_button = QPushButton("Select All")
+        select_all_button.clicked.connect(self.select_all)
+        select_row.addWidget(select_all_button)
+
+        deselect_all_button = QPushButton("Deselect All")
+        deselect_all_button.clicked.connect(self.deselect_all)
+        select_row.addWidget(deselect_all_button)
+
+        select_row.addStretch(1)
+        layout.addLayout(select_row)
 
         # --- Inclusion tree ---
         self.tree = QTreeWidget()
@@ -86,9 +99,9 @@ class ExportDialog(QDialog):
 
         # --- Action buttons ---
         button_row = QHBoxLayout()
-        export_all_button = QPushButton("Export All")
-        export_all_button.clicked.connect(self.do_export_all)
-        button_row.addWidget(export_all_button)
+        export_button = QPushButton("Export")
+        export_button.clicked.connect(self.do_export)
+        button_row.addWidget(export_button)
 
         export_per_instrument_button = QPushButton("Export Per Instrument")
         export_per_instrument_button.clicked.connect(self.do_export_per_instrument)
@@ -137,6 +150,36 @@ class ExportDialog(QDialog):
         self.tree.expandAll()
         self.tree.blockSignals(False)
 
+    def select_all(self):
+        self._set_all_checked(Qt.CheckState.Checked)
+
+    def deselect_all(self):
+        self._set_all_checked(Qt.CheckState.Unchecked)
+
+    def _set_all_checked(self, state):
+        """Bulk-sets every instrument and group row's check state and
+        underlying .included value in one pass. Signals are blocked
+        during the update (matching populate_tree's own pattern) since
+        on_item_changed only handles ONE item at a time - the grey-
+        out-children logic it would normally apply per-click is
+        applied directly here instead, for every row at once.
+        """
+        self.tree.blockSignals(True)
+        checked = state == Qt.CheckState.Checked
+        for i in range(self.tree.topLevelItemCount()):
+            instrument_item = self.tree.topLevelItem(i)
+            instrument_item.setCheckState(COL_NAME, state)
+            _, instrument = instrument_item.data(COL_NAME, Qt.ItemDataRole.UserRole)
+            instrument.included = checked
+
+            for j in range(instrument_item.childCount()):
+                group_item = instrument_item.child(j)
+                group_item.setCheckState(COL_NAME, state)
+                _, group = group_item.data(COL_NAME, Qt.ItemDataRole.UserRole)
+                group.included = checked
+                group_item.setDisabled(not checked)
+        self.tree.blockSignals(False)
+
     def on_item_changed(self, item, column):
         if column != COL_NAME:
             return
@@ -163,7 +206,7 @@ class ExportDialog(QDialog):
 
     # --- Export actions ---------------------------------------------------
 
-    def do_export_all(self):
+    def do_export(self):
         folder = self.folder_edit.text().strip()
         filename = self.filename_edit.text().strip()
 

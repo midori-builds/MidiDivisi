@@ -168,38 +168,103 @@ def render_musicxml_to_svg_pages(musicxml_string):
     return [_flatten_text_labels(_flatten_nested_svg(svg)) for svg in raw_pages]
 
 
-_TEXT_LABEL_PATTERN = re.compile(
-    r'(<text[^>]*?)font-size="0px"([^>]*>)\s*'
-    r'(?:<tspan(?![^>]*font-size)[^>]*>\s*)+'
-    r'<tspan[^>]*font-size="(\d+px)"[^>]*>(.*?)</tspan>\s*'
-    r"(?:</tspan>\s*)+</text>",
-    re.DOTALL,
-)
+SVG_NS = "http://www.w3.org/2000/svg"
+XLINK_NS = "http://www.w3.org/1999/xlink"
+ET.register_namespace("", SVG_NS)  # keeps output tags unprefixed ("svg", not "ns0:svg") - Qt's renderer expects plain SVG tag names
+# A real bug this specifically fixes, found via the user's screenshot
+# after the previous fix shipped, not caught before then: WITHOUT this
+# registration, ElementTree auto-generates a generic prefix (ns1, ns2,
+# ...) for any namespace it encounters that hasn't been registered -
+# turning every xlink:href attribute into something like ns1:href on
+# serialization. Verovio uses xlink:href on <use> elements for EVERY
+# glyph (noteheads, clefs, rests, dynamics, time/key signatures - all
+# of it), so this one omission silently broke every single glyph
+# reference at once, while raw path/line content (beams, slurs, tempo
+# text) kept rendering fine - exactly matching what the screenshot
+# showed. The "link # is undefined!" warning noted as a separate,
+# lower-priority cosmetic issue in the previous fix was actually THIS
+# same bug, just manifesting as a warning instead of an outright
+# missing symbol for whichever instrument happened to be tested then -
+# should have been chased down immediately instead of set aside.
+ET.register_namespace("xlink", XLINK_NS)
 
 
 def _flatten_text_labels(svg):
     """Flatten Verovio's "<text font-size=0px> wrapping one or more
-    plain <tspan> layers, ending in one real <tspan font-size=Npx>
-    CONTENT</tspan>" pattern (zero out the parent, size everything via
-    nested tspans) into a single <text font-size="Npx">CONTENT</text>.
+    plain <tspan> layers, ending in one or more real
+    <tspan font-size=Npx>CONTENT</tspan> runs" pattern (zero out the
+    parent, size everything via nested tspans) into a
+    <text font-size="Npx"> with those real tspans as DIRECT children.
 
-    The number of wrapper levels varies by content type - confirmed
-    directly, not assumed: instrument names/measure numbers use 2
-    levels, but text directions (e.g. "mute") use 3 (an extra
-    class="rend" wrapper) - so this matches an arbitrary number of
-    wrapper levels generically rather than a hardcoded count, which
-    is what a first version (assuming exactly 2 levels always) missed
-    for one specific real case.
+    Rewritten to operate on the parsed XML TREE rather than a regex
+    over the raw text - a real, found-not-assumed bug in an earlier
+    regex-based version: it correctly handled a SINGLE run of nested
+    wrapper tspans, but a tempo marking ("Andante moderato") turned
+    out to have TWO SIBLING wrapper groups within the same outer
+    <text> element (multiple differently-styled runs, not one) - a
+    genuinely different tree shape a regex can't reliably distinguish
+    from "this <text> element is now complete" while scanning linear
+    text. The regex matched partway through the first run's closing
+    tags, mistaking them for the final </text>, and left the second
+    run and the REAL closing tag orphaned - producing literally
+    malformed XML (a <text> opening tag closed by </tspan>) that Qt's
+    SVG parser rejected outright, silently falling back to a tiny
+    default widget size - which is what actually caused certain
+    instruments' previews to appear to show nothing at all. A tree-
+    based approach sidesteps the whole class of bug: correctly finds
+    ALL real-content tspans (any font-size other than 0px) as
+    descendants of a font-size=0px <text>, however many sibling runs
+    there are, since parent/child/sibling relationships are read from
+    the actual tree structure rather than inferred from text pattern
+    matching.
 
-    This is what was causing instrument names, measure numbers, and
-    text directions to go missing - the nested-svg fix above resolved
-    the actual notation being blank, but text labels specifically use
-    this SEPARATE pattern, triggering a different set of Qt warnings
-    ("Point size <= 0", "Could not add child element to parent
-    element") - confirmed by finding every warning's exact source
-    line and seeing all of them were this structure.
+    Each real-content tspan becomes a direct child of the flattened
+    <text> element, keeping its own font-size - preserving multi-run
+    styling rather than collapsing everything into one merged string
+    with only the first run's size.
     """
-    return _TEXT_LABEL_PATTERN.sub(r'\1font-size="\3"\2\4</text>', svg)
+    root = ET.fromstring(svg)
+    text_tag = f"{{{SVG_NS}}}text"
+    tspan_tag = f"{{{SVG_NS}}}tspan"
+
+    for text_el in root.iter(text_tag):
+        if text_el.get("font-size") != "0px":
+            continue
+
+        real_content_tspans = [
+            el for el in text_el.iter(tspan_tag)
+            if el.get("font-size") not in (None, "0px") and (el.text or "").strip()
+        ]
+        if not real_content_tspans:
+            continue  # doesn't match the expected wrapper shape - leave untouched rather than guess
+
+        text_el.set("font-size", real_content_tspans[0].get("font-size"))
+        for child in list(text_el):
+            text_el.remove(child)
+        text_el.text = None
+        for tspan in real_content_tspans:
+            # A real, separate bug found via a screenshot after the
+            # first version of this fix shipped: only font-size was
+            # being copied here, silently dropping every other
+            # attribute - including font-family, which for Verovio's
+            # music-glyph tspans (e.g. a metronome mark's note symbol,
+            # rendered as a private-use-area character in a dedicated
+            # "Leipzig" glyph font) is what actually maps that
+            # character to a visible symbol at all. Without it, the
+            # character survives in the output (confirmed directly -
+            # this was never actually a content-loss bug) but renders
+            # as an empty/missing glyph in whatever the ambient font
+            # is, which has no mapping for that private-use codepoint
+            # - visible in the screenshot as a solid black placeholder
+            # box instead of the quarter-note symbol. Copying every
+            # attribute rather than reconstructing just the one this
+            # was tested against is what actually generalizes
+            # correctly, the same lesson the tree-based rewrite itself
+            # was already meant to teach.
+            flat_tspan = ET.SubElement(text_el, tspan_tag, dict(tspan.attrib))
+            flat_tspan.text = tspan.text
+
+    return ET.tostring(root, encoding="unicode")
 
 
 def _flatten_nested_svg(svg):

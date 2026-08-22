@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtSvgWidgets import QSvgWidget
 
 from mididivisi.core.notation_preview import extract_part_xml, render_musicxml_to_svg_pages
+from mididivisi.ui.theme import COLORS
 
 # Bounds on manual zoom - generous enough to be useless in practice,
 # just guarding against absurd/degenerate widget sizes.
@@ -100,6 +101,18 @@ class NotationPreviewWindow(QMainWindow):
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(False)  # SVG has a real, scaled size - let it scroll, don't squash it
+        # The global QScrollArea rule (theme.py) is deliberately
+        # transparent everywhere else in the app, letting the dark
+        # background show through - which makes Verovio's solid-black
+        # notation nearly illegible here. Overridden directly on this
+        # ONE widget, not globally, so every other scroll area in the
+        # app keeps the normal dark theme. Both the QScrollArea AND
+        # its viewport need this explicitly - a real Qt quirk, not
+        # redundant: the viewport is a separate child widget that
+        # doesn't reliably inherit a background set only on its parent.
+        notation_bg_style = f"background-color: {COLORS['notation_bg']}; border: none;"
+        self.scroll_area.setStyleSheet(notation_bg_style)
+        self.scroll_area.viewport().setStyleSheet(notation_bg_style)
         self.svg_widget = QSvgWidget()
         self.scroll_area.setWidget(self.svg_widget)
         layout.addWidget(self.scroll_area, 1)

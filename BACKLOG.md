@@ -212,8 +212,14 @@ Verovio, zoom/fit, working text labels) is done. Not yet built:
   `<part>` for what music21 splits into two.
 - Merged (multi-identity) instruments only preview their first
   identity, not a combined view.
-- New dependency `verovio` isn't reflected in a requirements.txt yet
-  (none exists in the dev environment this was built in).
+- Cosmetic, not the reported blank-preview bug (that's fixed - see
+  DEVLOG.md): Qt logs repeated "link # is undefined!" warnings for
+  every instrument's rendered SVG, including already-correctly-working
+  ones - likely an unresolved `<use href="#...">` reference to a
+  shared Verovio symbol definition. Doesn't affect validity or sizing,
+  not yet investigated further.
+- `requirements.txt` now exists (added when reviewing the README), so
+  this is resolved.
 
 ## Divisi - open items
 
